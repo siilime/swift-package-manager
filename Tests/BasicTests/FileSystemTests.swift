@@ -11,9 +11,8 @@
 import XCTest
 
 import Basic
-import POSIX
-
 import TestSupport
+import libc
 
 class FileSystemTests: XCTestCase {
 
@@ -41,6 +40,22 @@ class FileSystemTests: XCTestCase {
         XCTAssertTrue(fs.isSymlink(sym))
         XCTAssertTrue(fs.isFile(sym))
         XCTAssertFalse(fs.isDirectory(sym))
+
+        // isExecutableFile
+        let executable = tempDir.path.appending(component: "exec-foo")
+        let stream = BufferedOutputByteStream()
+        stream <<< """
+            #!/bin/sh
+            set -e
+            exit
+
+            """
+        try! localFileSystem.writeFileContents(executable, bytes: stream.bytes)
+        try! Process.checkNonZeroExit(args: "chmod", "+x", executable.asString)
+        XCTAssertTrue(fs.isExecutableFile(executable))
+        XCTAssertFalse(fs.isExecutableFile(sym))
+        XCTAssertFalse(fs.isExecutableFile(file.path))
+        XCTAssertFalse(fs.isExecutableFile(AbsolutePath("/does-not-exist")))
 
         // isDirectory()
         XCTAssert(fs.isDirectory(AbsolutePath("/")))
@@ -311,6 +326,53 @@ class FileSystemTests: XCTestCase {
         try rerootedFileSystem.createDirectory(AbsolutePath("/subdir2"))
         XCTAssert(baseFileSystem.isDirectory(AbsolutePath("/base/rootIsHere/subdir2")))
     }
+
+    func testSetAttribute() throws {
+      #if os(macOS)
+        mktmpdir { path in
+            var fs = Basic.localFileSystem
+
+            let dir = path.appending(component: "dir")
+            let foo = dir.appending(component: "foo")
+            let bar = dir.appending(component: "bar")
+
+            try fs.createDirectory(dir, recursive: true)
+            try fs.writeFileContents(foo, bytes: "")
+            try fs.writeFileContents(bar, bytes: "")
+
+            // Set foo to unwritable.
+            try fs.chmod(.userUnWritable, path: foo)
+            XCTAssertThrows(FileSystemError.invalidAccess) {
+                try fs.writeFileContents(foo, bytes: "test")
+            }
+
+            // Set the directory as unwritable.
+            try fs.chmod(.userUnWritable, path: dir, options: [.recursive, .onlyFiles])
+            XCTAssertThrows(FileSystemError.invalidAccess) {
+                try fs.writeFileContents(bar, bytes: "test")
+            }
+            // It should be possible to add files.
+            try fs.writeFileContents(dir.appending(component: "new"), bytes: "")
+
+            // But not anymore.
+            try fs.chmod(.userUnWritable, path: dir, options: [.recursive])
+            XCTAssertThrows(FileSystemError.invalidAccess) {
+                try fs.writeFileContents(dir.appending(component: "new2"), bytes: "")
+            }
+
+            try? fs.removeFileTree(bar)
+            try? fs.removeFileTree(dir)
+            XCTAssertTrue(fs.exists(dir))
+            XCTAssertTrue(fs.exists(bar))
+
+            // Set the entire directory as writable.
+            try fs.chmod(.userWritable, path: dir, options: [.recursive])
+            try fs.writeFileContents(foo, bytes: "test")
+            try fs.removeFileTree(dir)
+            XCTAssertFalse(fs.exists(dir))
+        }
+      #endif
+    }
     
     static var allTests = [
         ("testLocalBasics", testLocalBasics),
@@ -322,6 +384,7 @@ class FileSystemTests: XCTestCase {
         ("testInMemoryReadWriteFile", testInMemoryReadWriteFile),
         ("testRootedFileSystem", testRootedFileSystem),
         ("testRemoveFileTree", testRemoveFileTree),
+        ("testSetAttribute", testSetAttribute),
         ("testInMemRemoveFileTree", testInMemRemoveFileTree),
     ]
 }
@@ -336,7 +399,7 @@ private func removeFileTreeTester(fs: inout FileSystem, basePath path: AbsoluteP
     let folders = path.appending(components: "foo", "bar", "baz")
     try fs.createDirectory(folders, recursive: true)
     XCTAssert(fs.exists(folders), file: file, line: line)
-    fs.removeFileTree(folders)
+    try fs.removeFileTree(folders)
     XCTAssertFalse(fs.exists(folders), file: file, line: line)
 
     // Test removing file.
@@ -344,6 +407,6 @@ private func removeFileTreeTester(fs: inout FileSystem, basePath path: AbsoluteP
     try fs.createDirectory(folders, recursive: true)
     try fs.writeFileContents(filePath, bytes: "foo")
     XCTAssert(fs.exists(filePath), file: file, line: line)
-    fs.removeFileTree(filePath)
+    try fs.removeFileTree(filePath)
     XCTAssertFalse(fs.exists(filePath), file: file, line: line)
 }

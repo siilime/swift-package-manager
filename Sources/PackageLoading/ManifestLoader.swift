@@ -16,7 +16,7 @@ import func POSIX.realpath
 
 public enum ManifestParseError: Swift.Error {
     /// The manifest file is empty.
-    case emptyManifestFile
+    case emptyManifestFile(url: String, version: String?)
 
     /// The manifest had a string encoding error.
     case invalidEncoding
@@ -34,10 +34,30 @@ public enum ManifestParseError: Swift.Error {
 /// using the package manager with alternate toolchains in the future.
 public protocol ManifestResourceProvider {
     /// The path of the swift compiler.
-    var swiftCompilerPath: AbsolutePath { get }
+    var swiftCompiler: AbsolutePath { get }
 
     /// The path of the library resources.
-    var libraryPath: AbsolutePath { get }
+    var libDir: AbsolutePath { get }
+
+    /// The path to SDK root.
+    ///
+    /// If provided, it will be passed to the swift interpreter.
+    var sdkRoot: AbsolutePath? { get }
+}
+
+/// Default implemention for the resource provider.
+public extension ManifestResourceProvider {
+
+    var sdkRoot: AbsolutePath? {
+        return nil
+    }
+}
+
+extension ToolsVersion {
+    /// Returns the manifest version for this tools version.
+    public var manifestVersion: ManifestVersion {
+        return major == 3 ? .three : .four
+    }
 }
 
 /// Protocol for the manifest loader interface.
@@ -48,8 +68,15 @@ public protocol ManifestLoaderProtocol {
     ///   - path: The root path of the package.
     ///   - baseURL: The URL the manifest was loaded from.
     ///   - version: The version the manifest is from, if known.
+    ///   - manifestVersion: The version of manifest to load.
     ///   - fileSystem: If given, the file system to load from (otherwise load from the local file system).
-    func load(packagePath path: AbsolutePath, baseURL: String, version: Version?, fileSystem: FileSystem?) throws -> Manifest
+    func load(
+        packagePath path: AbsolutePath,
+        baseURL: String,
+        version: Version?,
+        manifestVersion: ManifestVersion,
+        fileSystem: FileSystem?
+    ) throws -> Manifest
 }
 
 extension ManifestLoaderProtocol {
@@ -64,9 +91,15 @@ extension ManifestLoaderProtocol {
         package path: AbsolutePath,
         baseURL: String,
         version: Version? = nil,
+        manifestVersion: ManifestVersion,
         fileSystem: FileSystem? = nil
     ) throws -> Manifest {
-        return try load(packagePath: path, baseURL: baseURL, version: version, fileSystem: fileSystem)
+        return try load(
+            packagePath: path,
+            baseURL: baseURL,
+            version: version,
+            manifestVersion: manifestVersion,
+            fileSystem: fileSystem)
     }
 }
 
@@ -78,22 +111,31 @@ extension ManifestLoaderProtocol {
 /// serialized form of the manifest (as implemented by `PackageDescription`'s
 /// `atexit()` handler) which is then deserialized and loaded.
 public final class ManifestLoader: ManifestLoaderProtocol {
-    let resources: ManifestResourceProvider
 
-    public init(resources: ManifestResourceProvider) {
+    let resources: ManifestResourceProvider
+    let isManifestSandboxEnabled: Bool
+
+    public init(
+        resources: ManifestResourceProvider,
+        isManifestSandboxEnabled: Bool = true
+    ) {
         self.resources = resources
+        self.isManifestSandboxEnabled = isManifestSandboxEnabled
     }
 
-    public func load(packagePath path: AbsolutePath, baseURL: String, version: Version?, fileSystem: FileSystem? = nil) throws -> Manifest {
-        // As per our versioning support, determine the appropriate manifest version to load.
-        for versionSpecificKey in Versioning.currentVersionSpecificKeys { 
-            let versionSpecificPath = path.appending(component: Manifest.basename + versionSpecificKey + ".swift")
-            if (fileSystem ?? localFileSystem).exists(versionSpecificPath) {
-                return try loadFile(path: versionSpecificPath, baseURL: baseURL, version: version, fileSystem: fileSystem)
-            }
-        }
-        
-        return try loadFile(path: path.appending(component: Manifest.filename), baseURL: baseURL, version: version, fileSystem: fileSystem)
+    public func load(
+        packagePath path: AbsolutePath,
+        baseURL: String,
+        version: Version?,
+        manifestVersion: ManifestVersion,
+        fileSystem: FileSystem? = nil
+    ) throws -> Manifest {
+        return try loadFile(
+            path: Manifest.path(atPackagePath: path, fileSystem: fileSystem ?? localFileSystem),
+            baseURL: baseURL,
+            version: version,
+            manifestVersion: manifestVersion,
+            fileSystem: fileSystem)
     }
 
     /// Create a manifest by loading a specific manifest file from the given `path`.
@@ -103,7 +145,13 @@ public final class ManifestLoader: ManifestLoaderProtocol {
     ///   - baseURL: The URL the manifest was loaded from.
     ///   - version: The version the manifest is from, if known.
     ///   - fileSystem: If given, the file system to load from (otherwise load from the local file system).
-    func loadFile(path inputPath: AbsolutePath, baseURL: String, version: Version?, fileSystem: FileSystem? = nil) throws -> Manifest {
+    func loadFile(
+        path inputPath: AbsolutePath,
+        baseURL: String,
+        version: Version?,
+        manifestVersion: ManifestVersion = .three,
+        fileSystem: FileSystem? = nil
+    ) throws -> Manifest {
         // If we were given a file system, load via a temporary file.
         if let fileSystem = fileSystem {
             let contents: ByteString
@@ -114,76 +162,91 @@ public final class ManifestLoader: ManifestLoaderProtocol {
             }
             let tmpFile = try TemporaryFile(suffix: ".swift")
             try localFileSystem.writeFileContents(tmpFile.path, bytes: contents)
-            return try loadFile(path: tmpFile.path, baseURL: baseURL, version: version)
+            return try loadFile(
+                path: tmpFile.path,
+                baseURL: baseURL,
+                version: version,
+                manifestVersion: manifestVersion)
         }
 
         guard baseURL.chuzzle() != nil else { fatalError() }  //TODO
 
-        // Attempt to canonicalize the URL.
-        //
-        // This is important when the baseURL is a file system path, so that the
-        // URLs embedded into the manifest are canonical.
-        //
-        // FIXME: We really shouldn't be handling this here and in this fashion.
-        var baseURL = baseURL
-        if URL.scheme(baseURL) == nil {
-            if let resolved = try? realpath(baseURL) {
-                baseURL = resolved
-            }
+        // Validate that the file exists.
+        guard isFile(inputPath) else {
+            throw PackageModel.Package.Error.noManifest(baseURL: baseURL, version: version?.description)
         }
 
-        // Compute the actual input file path.
-        let path: AbsolutePath = isDirectory(inputPath) ? inputPath.appending(component: Manifest.filename) : inputPath
+        let parseResult = try parse(path: inputPath, manifestVersion: manifestVersion)
 
-        // Validate that the file exists.
-        guard isFile(path) else { throw PackageModel.Package.Error.noManifest(baseURL: baseURL, version: version?.description) }
-
-        // Load the manifest description.
-        guard let jsonString = try parse(path: path) else {
-            throw ManifestParseError.emptyManifestFile
+        // Get the json from manifest.
+        guard let jsonString = parseResult.jsonString else {
+            // FIXME: This only supports version right now, we need support for
+            // branch and revision too.
+            throw ManifestParseError.emptyManifestFile(url: baseURL, version: version?.description) 
         }
         let json = try JSON(string: jsonString)
 
-        // Create PackageDescription objects from the JSON.
-        let pd = loadPackageDescription(json, baseURL: baseURL)
-        guard pd.errors.isEmpty else {
-            throw ManifestParseError.runtimeManifestErrors(pd.errors)
+        // The loaded manifest object.
+        let manifest: Manifest
+
+        // Load the correct version from JSON.
+        switch manifestVersion {
+        case .three:
+            let pd = try loadPackageDescription(json, baseURL: baseURL)
+            manifest = Manifest(
+                path: inputPath,
+                url: baseURL,
+                package: .v3(pd.package),
+                legacyProducts: pd.products,
+                version: version,
+                interpreterFlags: parseResult.interpreterFlags)
+
+        case .four:
+            let package = try loadPackageDescription4(json, baseURL: baseURL)
+            manifest = Manifest(
+                path: inputPath,
+                url: baseURL,
+                package: .v4(package),
+                version: version,
+                interpreterFlags: parseResult.interpreterFlags)
         }
 
-        return Manifest(path: path, url: baseURL, package: pd.package, legacyProducts: pd.products, version: version)
+        return manifest
     }
 
     /// Parse the manifest at the given path to JSON.
-    private func parse(path manifestPath: AbsolutePath) throws -> String? {
+    private func parse(
+        path manifestPath: AbsolutePath,
+        manifestVersion: ManifestVersion
+    ) throws -> (jsonString: String?, interpreterFlags: [String]) {
         // The compiler has special meaning for files with extensions like .ll, .bc etc.
         // Assert that we only try to load files with extension .swift to avoid unexpected loading behavior.
-        assert(manifestPath.extension == "swift", "Manifest files must contain .swift suffix in their name, given: \(manifestPath.asString).")
+        assert(manifestPath.extension == "swift",
+               "Manifest files must contain .swift suffix in their name, given: \(manifestPath.asString).")
 
         // For now, we load the manifest by having Swift interpret it directly.
-        // Eventually, we should have two loading processes, one that loads only the
+        // Eventually, we should have two loading processes, one that loads only
         // the declarative package specification using the Swift compiler directly
         // and validates it.
 
-        // Hardcoded path to v3 for now.
-        let runtimePath = resources.libraryPath.appending(component: "3").asString
-    
-        var cmd = [resources.swiftCompilerPath.asString]
+        // Compute the path to runtime we need to load.
+        let runtimePath = self.runtimePath(for: manifestVersion).asString
+        let interpreterFlags = self.interpreterFlags(for: manifestVersion)
+
+        var cmd = [String]()
+      #if os(macOS)
+        // If enabled, use sandbox-exec on macOS. This provides some safety against
+        // arbitrary code execution when parsing manifest files. We only allow
+        // the permissions which are absolutely necessary for manifest parsing.
+        if isManifestSandboxEnabled {
+            cmd += ["sandbox-exec", "-p", sandboxProfile()]
+        }
+      #endif
+        cmd += [resources.swiftCompiler.asString]
         cmd += ["--driver-mode=swift"]
         cmd += verbosity.ccArgs
-        cmd += ["-I", runtimePath]
-    
-        // When running from Xcode, load PackageDescription.framework
-        // else load the dylib version of it
-    #if Xcode
-        cmd += ["-F", resources.libraryPath.asString]
-        cmd += ["-framework", "PackageDescription"]
-    #else
-        cmd += ["-L", runtimePath, "-lPackageDescription"] 
-    #endif
-    
-    #if os(macOS)
-        cmd += ["-target", "x86_64-apple-macosx10.10"]
-    #endif
+        cmd += ["-L", runtimePath, "-lPackageDescription"]
+        cmd += interpreterFlags
         cmd += [manifestPath.asString]
 
         // Create and open a temporary file to write json to.
@@ -192,18 +255,84 @@ public final class ManifestLoader: ManifestLoaderProtocol {
         cmd += ["-fileno", "\(file.fileHandle.fileDescriptor)"]
 
         // Run the command.
-        let output = try Process.popen(arguments: cmd).utf8Output().chuzzle()
+        let result = try Process.popen(arguments: cmd)
+        let output = try (result.utf8Output() + result.utf8stderrOutput()).chuzzle()
 
         // We expect output from interpreter to be empty, if something was emitted
         // throw and report it.
         if let output = output {
             throw ManifestParseError.invalidManifestFormat(output)
         }
-    
+
         guard let json = try localFileSystem.readFileContents(file.path).asString else {
             throw ManifestParseError.invalidEncoding
         }
-    
-        return json.isEmpty ? nil : json
+
+        return (json.isEmpty ? nil : json, interpreterFlags)
     }
+
+    /// Returns path to the sdk, if possible.
+    private func sdkRoot() -> AbsolutePath? {
+        if let sdkRoot = _sdkRoot {
+            return sdkRoot
+        }
+
+        // Find SDKROOT on macOS using xcrun.
+      #if os(macOS)
+        let foundPath = try? Process.checkNonZeroExit(
+            args: "xcrun", "--sdk", "macosx", "--show-sdk-path")
+        guard let sdkRoot = foundPath?.chomp(), !sdkRoot.isEmpty else {
+            return nil
+        }
+        _sdkRoot = AbsolutePath(sdkRoot)
+      #endif
+
+        return _sdkRoot
+    }
+    // Cache storage for computed sdk path.
+    private var _sdkRoot: AbsolutePath? = nil
+
+    /// Returns the interpreter flags for a manifest.
+    public func interpreterFlags(
+        for manifestVersion: ManifestVersion
+    ) -> [String] {
+        var cmd = [String]()
+        let runtimePath = self.runtimePath(for: manifestVersion)
+        cmd += ["-swift-version", String(manifestVersion.rawValue)]
+        cmd += ["-I", runtimePath.asString]
+      #if os(macOS)
+        cmd += ["-target", "x86_64-apple-macosx10.10"]
+      #endif
+        if let sdkRoot = resources.sdkRoot ?? self.sdkRoot() {
+            cmd += ["-sdk", sdkRoot.asString]
+        }
+        return cmd
+    }
+
+    /// Returns the runtime path given the manifest version and path to libDir.
+    private func runtimePath(for version: ManifestVersion) -> AbsolutePath {
+        return resources.libDir.appending(component: String(version.rawValue))
+    }
+}
+
+/// Returns the sandbox profile to be used when parsing manifest on macOS.
+private func sandboxProfile() -> String {
+    let stream = BufferedOutputByteStream()
+    stream <<< "(version 1)" <<< "\n"
+    // Deny everything by default.
+    stream <<< "(deny default)" <<< "\n"
+    // Import the system sandbox profile.
+    stream <<< "(import \"system.sb\")" <<< "\n"
+    // Allow reading all files.
+    stream <<< "(allow file-read*)" <<< "\n"
+    // These are required by the Swift compiler.
+    stream <<< "(allow process*)" <<< "\n"
+    stream <<< "(allow sysctl*)" <<< "\n"
+    // Allow writing in temporary locations.
+    stream <<< "(allow file-write*" <<< "\n"
+    for directory in Platform.darwinCacheDirectories() {
+        stream <<< "    (regex #\"^\(directory.asString)/org\\.llvm\\.clang.*\")" <<< "\n"
+    }
+    stream <<< ")" <<< "\n"
+    return stream.bytes.asString!
 }

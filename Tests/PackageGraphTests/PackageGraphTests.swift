@@ -13,6 +13,7 @@ import XCTest
 import Basic
 @testable import PackageGraph
 import PackageDescription
+import PackageDescription4
 import PackageModel
 import TestSupport
 import enum PackageLoading.ModuleError
@@ -29,19 +30,55 @@ class PackageGraphTests: XCTestCase {
             "/Baz/Tests/BazTests/source.swift"
         )
 
-        let g = try loadMockPackageGraph([
+        let diagnostics = DiagnosticsEngine()
+        let g = loadMockPackageGraph([
             "/Foo": Package(name: "Foo", targets: [Target(name: "Foo", dependencies: ["FooDep"])]),
             "/Bar": Package(name: "Bar", dependencies: [.Package(url: "/Foo", majorVersion: 1)]),
             "/Baz": Package(name: "Baz", dependencies: [.Package(url: "/Bar", majorVersion: 1)]),
-        ], root: "/Baz", in: fs)
+        ], root: "/Baz", diagnostics: diagnostics, in: fs)
 
         PackageGraphTester(g) { result in
             result.check(packages: "Bar", "Foo", "Baz")
-            result.check(modules: "Bar", "Foo", "Baz", "FooDep")
+            result.check(targets: "Bar", "Foo", "Baz", "FooDep")
             result.check(testModules: "BazTests", "FooTests")
-            result.check(dependencies: "FooDep", module: "Foo")
-            result.check(dependencies: "Foo", module: "Bar")
-            result.check(dependencies: "Bar", module: "Baz")
+            result.check(dependencies: "FooDep", target: "Foo")
+            result.check(dependencies: "Foo", target: "Bar")
+            result.check(dependencies: "Bar", target: "Baz")
+        }
+    }
+
+    func testProductDependencies() throws {
+        typealias Package = PackageDescription4.Package
+
+        let fs = InMemoryFileSystem(emptyFiles:
+            "/Foo/Sources/Foo/source.swift",
+            "/Bar/Source/Bar/source.swift"
+        )
+
+        let diagnostics = DiagnosticsEngine()
+        let g = loadMockPackageGraph4([
+            "/Bar": Package(
+                name: "Bar",
+                products: [
+                    .library(name: "Bar", targets: ["Bar"]),
+                ],
+                targets: [
+                    .target(name: "Bar"),
+                ]),
+            "/Foo": .init(
+                name: "Foo",
+                dependencies: [
+                    .package(url: "/Bar", from: "1.0.0"),
+                ],
+                targets: [
+                    .target(name: "Foo", dependencies: ["Bar"]),
+                ]),
+        ], root: "/Foo", diagnostics: diagnostics, in: fs)
+
+        PackageGraphTester(g) { result in
+            result.check(packages: "Bar", "Foo")
+            result.check(targets: "Bar", "Foo")
+            result.check(dependencies: "Bar", target: "Foo")
         }
     }
 
@@ -52,16 +89,14 @@ class PackageGraphTests: XCTestCase {
             "/Baz/source.swift"
         )
 
-        do {
-            _ = try loadMockPackageGraph([
-                "/Foo": Package(name: "Foo", dependencies: [.Package(url: "/Bar", majorVersion: 1)]),
-                "/Bar": Package(name: "Bar", dependencies: [.Package(url: "/Baz", majorVersion: 1)]),
-                "/Baz": Package(name: "Baz", dependencies: [.Package(url: "/Bar", majorVersion: 1)]),
-            ], root: "/Foo", in: fs)
-        } catch PackageGraphError.cycleDetected(let cycle) {
-            XCTAssertEqual(cycle.path.map {$0.name}, ["Foo"])
-            XCTAssertEqual(cycle.cycle.map {$0.name}.sorted(), ["Bar", "Baz"])
-        }
+        let diagnostics = DiagnosticsEngine()
+        _ = loadMockPackageGraph([
+            "/Foo": Package(name: "Foo", dependencies: [.Package(url: "/Bar", majorVersion: 1)]),
+            "/Bar": Package(name: "Bar", dependencies: [.Package(url: "/Baz", majorVersion: 1)]),
+            "/Baz": Package(name: "Baz", dependencies: [.Package(url: "/Bar", majorVersion: 1)]),
+        ], root: "/Foo", diagnostics: diagnostics, in: fs)
+
+        XCTAssertEqual(diagnostics.diagnostics[0].localizedDescription, "cyclic dependency declaration found: Foo -> Bar -> Baz -> Bar")
     }
 
     // Make sure there is no error when we reference Test targets in a package and then
@@ -74,14 +109,14 @@ class PackageGraphTests: XCTestCase {
             "/Bar/Tests/BarTests/source.swift"
         )
 
-        let g = try loadMockPackageGraph([
+        let g = loadMockPackageGraph([
             "/Foo": Package(name: "Foo", targets: [Target(name: "SomeTests", dependencies: ["Foo"])]),
             "/Bar": Package(name: "Bar", dependencies: [.Package(url: "/Foo", majorVersion: 1)]),
         ], root: "/Bar", in: fs)
 
         PackageGraphTester(g) { result in
             result.check(packages: "Bar", "Foo")
-            result.check(modules: "Bar", "Foo")
+            result.check(targets: "Bar", "Foo")
             result.check(testModules: "BarTests", "SomeTests")
         }
     }
@@ -92,83 +127,55 @@ class PackageGraphTests: XCTestCase {
             "/Bar/source.swift"
         )
 
-        do {
-            let g = try loadMockPackageGraph([
-                "/Foo": Package(name: "Foo"),
-                "/Bar": Package(name: "Bar", dependencies: [.Package(url: "/Foo", majorVersion: 1)]),
-            ], root: "/Bar", in: fs)
-            XCTFail("Unexpected graph \(g)")
-        } catch ModuleError.duplicateModule(let module) {
-            XCTAssertEqual(module, "Bar")
-        }
+        let diagnostics = DiagnosticsEngine()
+        _ = loadMockPackageGraph([
+            "/Foo": Package(name: "Foo"),
+            "/Bar": Package(name: "Bar", dependencies: [.Package(url: "/Foo", majorVersion: 1)]),
+        ], root: "/Bar", diagnostics: diagnostics, in: fs)
 
+        XCTAssertEqual(diagnostics.diagnostics[0].localizedDescription, "multiple targets named 'Bar'")
+    }
+
+    func testEmptyDependency() throws {
+        let fs = InMemoryFileSystem(emptyFiles:
+            "/Foo/Sources/Foo/foo.swift",
+            "/Bar/Sources/Bar/source.txt"
+        )
+
+        let diagnostics = DiagnosticsEngine()
+        _ = loadMockPackageGraph4([
+            "/Bar": Package(
+                name: "Bar",
+                products: [
+                    .library(name: "Bar", targets: ["Bar"]),
+                ],
+                targets: [
+                    .target(name: "Bar"),
+                ]),
+            "/Foo": .init(
+                name: "Foo",
+                dependencies: [
+                    .package(url: "/Bar", from: "1.0.0"),
+                ],
+                targets: [
+                    .target(name: "Foo", dependencies: ["Bar"]),
+                ]),
+            ], root: "/Foo", diagnostics: diagnostics, in: fs)
+
+        DiagnosticsEngineTester(diagnostics) { result in
+            result.check(diagnostic: "target 'Bar' in package 'Bar' contains no valid source files", behavior: .warning)
+            result.check(diagnostic: "target 'Bar' referenced in product 'Bar' could not be found", behavior: .error, location: "Package: Bar /Bar")
+            result.check(diagnostic: "product dependency 'Bar' not found", behavior: .error, location: "Package: Foo /Foo")
+
+        }
     }
 
     static var allTests = [
         ("testBasic", testBasic),
         ("testDuplicateModules", testDuplicateModules),
         ("testCycle", testCycle),
+        ("testProductDependencies", testProductDependencies),
         ("testTestTargetDeclInExternalPackage", testTestTargetDeclInExternalPackage),
+        ("testEmptyDependency", testEmptyDependency),
     ]
-}
-
-private func PackageGraphTester(_ graph: PackageGraph, _ result: (PackageGraphResult) -> Void) {
-    result(PackageGraphResult(graph))
-}
-
-private class PackageGraphResult {
-    let graph: PackageGraph
-
-    init(_ graph: PackageGraph) {
-        self.graph = graph
-    }
-
-    func check(packages: String..., file: StaticString = #file, line: UInt = #line) {
-        XCTAssertEqual(graph.packages.map {$0.name}.sorted(), packages.sorted(), file: file, line: line)
-    }
-
-    func check(modules: String..., file: StaticString = #file, line: UInt = #line) {
-        XCTAssertEqual(
-            graph.packages
-                .flatMap{ $0.modules }
-                .filter{ $0.type != .test }
-                .map{ $0.name }
-                .sorted(), modules.sorted(), file: file, line: line)
-    }
-
-    func check(testModules: String..., file: StaticString = #file, line: UInt = #line) {
-        XCTAssertEqual(
-            graph.packages
-                .flatMap{ $0.modules }
-                .filter{ $0.type == .test }
-                .map{ $0.name }
-                .sorted(), testModules.sorted(), file: file, line: line)
-    }
-
-    func find(module: String) -> ResolvedModule? {
-        for pkg in graph.packages {
-            if let module = pkg.modules.first(where: { $0.name == module }) {
-                return module
-            }
-        }
-        return nil
-    }
-
-    func check(dependencies: String..., module name: String, file: StaticString = #file, line: UInt = #line) {
-        guard let module = find(module: name) else {
-            return XCTFail("Module \(name) not found", file: file, line: line)
-        }
-        XCTAssertEqual(dependencies.sorted(), module.dependencies.map{$0.name}.sorted(), file: file, line: line)
-    }
-}
-
-extension ResolvedModule.Dependency {
-    var name: String {
-        switch self {
-        case .target(let target):
-            return target.name
-        case .product(let product):
-            return product.name
-        }
-    }
 }

@@ -10,30 +10,41 @@
 
 import Basic
 import Utility
+import Build
 
 public class ToolOptions {
     /// Custom arguments to pass to C compiler, swift compiler and the linker.
     public var buildFlags = BuildFlags()
+    
+    /// Build configuration.
+    public var configuration: Build.Configuration = .debug
 
     /// The custom build directory, if provided.
     public var buildPath: AbsolutePath?
 
-    /// The custom working directory that the tool should operate in.
+    /// The custom working directory that the tool should operate in (deprecated).
     public var chdir: AbsolutePath?
+    
+    /// The custom working directory that the tool should operate in.
+    public var packagePath: AbsolutePath?
 
     /// Enable prefetching in resolver which will kick off parallel git cloning.
-    public var enableResolverPrefetching = false
+    public var shouldEnableResolverPrefetching = true
 
     /// If print version option was passed.
-    public var printVersion: Bool = false
+    public var shouldPrintVersion: Bool = false
 
     /// The verbosity of informational output.
     public var verbosity: Int = 0
 
-    public required init() {}
+    /// Disables sandboxing when executing subprocesses.
+    public var shouldDisableSandbox = false
 
-    func absolutePathRelativeToWorkingDir(_ path: String?) -> AbsolutePath? {
-        guard let path = path else { return nil }
-        return AbsolutePath(path, relativeTo: currentWorkingDirectory)
-    }
+    /// Path to the compilation destination describing JSON file.
+    public var customCompileDestination: AbsolutePath?
+
+    /// If should link the Swift stdlib statically.
+    public var shouldLinkStaticSwiftStdlib = false
+
+    public required init() {}
 }

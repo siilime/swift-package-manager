@@ -11,7 +11,8 @@
 import XCTest
 
 import Basic
-import struct Utility.Version
+import Utility
+import PackageGraph
 import TestSupport
 import SourceControl
 @testable import Workspace
@@ -25,109 +26,116 @@ final class PinsStoreTests: XCTestCase {
         let bar = "bar"
         let fooRepo = RepositorySpecifier(url: "/foo")
         let barRepo = RepositorySpecifier(url: "/bar")
+        let revision = Revision(identifier: "81513c8fd220cf1ed1452b98060cd80d3725c5b7")
+        let fooRef = PackageReference(identity: foo, path: fooRepo.url)
+        let barRef = PackageReference(identity: bar, path: barRepo.url)
 
-        let pin = PinsStore.Pin(package: foo, repository: fooRepo, version: v1, reason: "bad")
+        let state = CheckoutState(revision: revision, version: v1)
+        let pin = PinsStore.Pin(packageRef: fooRef, state: state)
         // We should be able to round trip from JSON.
-        XCTAssertEqual(PinsStore.Pin(json: pin.toJSON()), pin)
-        
+        XCTAssertEqual(try PinsStore.Pin(json: pin.toJSON()), pin)
+
         let fs = InMemoryFileSystem()
         let pinsFile = AbsolutePath("/pinsfile.txt")
         var store = try PinsStore(pinsFile: pinsFile, fileSystem: fs)
         // Pins file should not be created right now.
         XCTAssert(!fs.exists(pinsFile))
         XCTAssert(store.pins.map{$0}.isEmpty)
-        XCTAssert(store.autoPin)
 
-        try store.pin(package: foo, repository: fooRepo, at: v1, reason: "bad")
+        store.pin(packageRef: fooRef, state: state)
+        try store.saveState()
+
         XCTAssert(fs.exists(pinsFile))
-
-        // Test autopin toggle and persistence.
-        do {
-            var store = try PinsStore(pinsFile: pinsFile, fileSystem: fs)
-            XCTAssert(store.autoPin)
-            try store.setAutoPin(on: false)
-            XCTAssertFalse(store.autoPin)
-        }
-        do {
-            var store = try PinsStore(pinsFile: pinsFile, fileSystem: fs)
-            XCTAssertFalse(store.autoPin)
-            try store.setAutoPin(on: true)
-            XCTAssert(store.autoPin)
-        }
-        do {
-            let store = try PinsStore(pinsFile: pinsFile, fileSystem: fs)
-            XCTAssert(store.autoPin)
-        }
 
         // Load the store again from disk.
         let store2 = try PinsStore(pinsFile: pinsFile, fileSystem: fs)
-        XCTAssert(store2.autoPin)
         // Test basics on the store.
         for s in [store, store2] {
             XCTAssert(s.pins.map{$0}.count == 1)
             XCTAssertEqual(s.pinsMap[bar], nil)
             let fooPin = s.pinsMap[foo]!
-            XCTAssertEqual(fooPin.package, foo)
-            XCTAssertEqual(fooPin.version, v1)
-            XCTAssertEqual(fooPin.reason, "bad")
+            XCTAssertEqual(fooPin.packageRef, fooRef)
+            XCTAssertEqual(fooPin.state.version, v1)
+            XCTAssertEqual(fooPin.state.revision, revision)
+            XCTAssertEqual(fooPin.state.description, v1.description)
         }
-        
+
         // We should be able to pin again.
-        try store.pin(package: foo, repository: fooRepo, at: v1)
-        try store.pin(package: foo, repository: fooRepo, at: "1.0.2")
+        store.pin(packageRef: fooRef, state: state)
+        store.pin(packageRef: fooRef, state: CheckoutState(revision: revision, version: "1.0.2"))
+        store.pin(packageRef: barRef, state: state)
+        try store.saveState()
 
-        XCTAssertThrows(PinOperationError.autoPinEnabled) {
-            try store.unpin(package: bar)
-        }
-
-        XCTAssertThrows(PinOperationError.notPinned) {
-            try store.setAutoPin(on: false)
-            try store.unpin(package: bar)
-        }
-
-        try store.pin(package: bar, repository: barRepo, at: v1)
+        store = try PinsStore(pinsFile: pinsFile, fileSystem: fs)
         XCTAssert(store.pins.map{$0}.count == 2)
-        try store.unpin(package: foo)
-        try store.unpin(package: bar)
-        XCTAssert(store.pins.map{$0}.isEmpty)
+
+        // Test branch pin.
+        do {
+            store.pin(packageRef: barRef, state: CheckoutState(revision: revision, branch: "develop"))
+            try store.saveState()
+            store = try PinsStore(pinsFile: pinsFile, fileSystem: fs)
+
+            let barPin = store.pinsMap[bar]!
+            XCTAssertEqual(barPin.state.branch, "develop")
+            XCTAssertEqual(barPin.state.version, nil)
+            XCTAssertEqual(barPin.state.revision, revision)
+            XCTAssertEqual(barPin.state.description, "develop")
+        }
+
+        // Test revision pin.
+        do {
+            store.pin(packageRef: barRef, state: CheckoutState(revision: revision))
+            try store.saveState()
+            store = try PinsStore(pinsFile: pinsFile, fileSystem: fs)
+
+            let barPin = store.pinsMap[bar]!
+            XCTAssertEqual(barPin.state.branch, nil)
+            XCTAssertEqual(barPin.state.version, nil)
+            XCTAssertEqual(barPin.state.revision, revision)
+            XCTAssertEqual(barPin.state.description, revision.identifier)
+        }
     }
 
-    func testLoadingV1() throws {
+    func testLoadingSchema1() throws {
+        var fs = InMemoryFileSystem()
         let pinsFile = AbsolutePath("/pinsfile.txt")
-        let fs = InMemoryFileSystem()
-        let contents =
-            "{"                                                         + "\n" +
-            "  \"autoPin\": true,"                                      + "\n" +
-            "  \"pins\": ["                                             + "\n" +
-            "    {"                                                     + "\n" +
-            "      \"package\": \"bam\","                               + "\n" +
-            "      \"reason\": null,"                                   + "\n" +
-            "      \"repositoryURL\": \"/private/tmp/BigPackage/bam\"," + "\n" +
-            "      \"version\": \"1.0.0\""                              + "\n" +
-            "    },"                                                    + "\n" +
-            "    {"                                                     + "\n" +
-            "      \"package\": \"bar\","                               + "\n" +
-            "      \"reason\": null,"                                   + "\n" +
-            "      \"repositoryURL\": \"/private/tmp/BigPackage/bar\"," + "\n" +
-            "      \"version\": \"1.0.0\""                              + "\n" +
-            "    },"                                                    + "\n" +
-            "    {"                                                     + "\n" +
-            "      \"package\": \"baz\","                               + "\n" +
-            "      \"reason\": null,"                                   + "\n" +
-            "      \"repositoryURL\": \"/private/tmp/BigPackage/baz\"," + "\n" +
-            "      \"version\": \"1.0.0\""                              + "\n" +
-            "    }"                                                     + "\n" +
-            "  ],"                                                      + "\n" +
-            "  \"version\": 1"                                          + "\n" +
-            "}"
-        try fs.writeFileContents(pinsFile, bytes: ByteString(encodingAsUTF8: contents))
+
+        try fs.writeFileContents(pinsFile) {
+            $0 <<< """
+                {
+                  "object": {
+                    "pins": [
+                      {
+                        "package": "Clang_C",
+                        "repositoryURL": "https://github.com/something/Clang_C.git",
+                        "state": {
+                          "branch": null,
+                          "revision": "90a9574276f0fd17f02f58979423c3fd4d73b59e",
+                          "version": "1.0.2"
+                        }
+                      },
+                      {
+                        "package": "Commandant",
+                        "repositoryURL": "https://github.com/something/Commandant.git",
+                        "state": {
+                          "branch": null,
+                          "revision": "c281992c31c3f41c48b5036c5a38185eaec32626",
+                          "version": "0.12.0"
+                        }
+                      }
+                    ]
+                  },
+                  "version": 1
+                }
+                """
+        }
+
         let store = try PinsStore(pinsFile: pinsFile, fileSystem: fs)
-        XCTAssertEqual(store.autoPin, true)
-        XCTAssertEqual(store.pins.map {$0.package}.sorted() , ["bam", "bar", "baz"])
+        XCTAssertEqual(store.pinsMap.keys.map{$0}.sorted(), ["clang_c", "commandant"])
     }
 
     static var allTests = [
         ("testBasics", testBasics),
-        ("testLoadingV1", testLoadingV1),
+        ("testLoadingSchema1", testLoadingSchema1),
     ]
 }

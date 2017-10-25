@@ -11,9 +11,7 @@
 import XCTest
 
 import Basic
-
-import func POSIX.popen
-
+import Commands
 import TestSupport
 import SourceControl
 
@@ -22,7 +20,7 @@ class DependencyResolutionTests: XCTestCase {
         fixture(name: "DependencyResolution/Internal/Simple") { prefix in
             XCTAssertBuilds(prefix)
 
-            let output = try popen([prefix.appending(components: ".build", "debug", "Foo").asString], environment: [:])
+            let output = try Process.checkNonZeroExit(args: prefix.appending(components: ".build", Destination.host.target, "debug", "Foo").asString)
             XCTAssertEqual(output, "Foo\nBar\n")
         }
     }
@@ -37,24 +35,23 @@ class DependencyResolutionTests: XCTestCase {
         fixture(name: "DependencyResolution/Internal/Complex") { prefix in
             XCTAssertBuilds(prefix)
 
-            let output = try popen([prefix.appending(components: ".build", "debug", "Foo").asString], environment: [:])
+            let output = try Process.checkNonZeroExit(args: prefix.appending(components: ".build", Destination.host.target, "debug", "Foo").asString)
             XCTAssertEqual(output, "meiow Baz\n")
         }
     }
 
     /// Check resolution of a trivial package with one dependency.
     func testExternalSimple() {
-        // This will tag 'Foo' with 1.0.0, to start.
-        fixture(name: "DependencyResolution/External/Simple", tags: ["1.0.0"]) { prefix in
+        fixture(name: "DependencyResolution/External/Simple") { prefix in
             // Add several other tags to check version selection.
             let repo = GitRepository(path: prefix.appending(components: "Foo"))
-            for tag in ["1.1.0", "1.2.0", "1.2.3"] {
+            for tag in ["1.1.0", "1.2.0"] {
                 try repo.tag(name: tag)
             }
 
             let packageRoot = prefix.appending(component: "Bar")
             XCTAssertBuilds(packageRoot)
-            XCTAssertFileExists(prefix.appending(components: "Bar", ".build", "debug", "Bar"))
+            XCTAssertFileExists(prefix.appending(components: "Bar", ".build", Destination.host.target, "debug", "Bar"))
             let path = try SwiftPMProduct.packagePath(for: "Foo", packageRoot: packageRoot)
             XCTAssert(GitRepository(path: path).tags.contains("1.2.3"))
         }
@@ -63,7 +60,7 @@ class DependencyResolutionTests: XCTestCase {
     func testExternalComplex() {
         fixture(name: "DependencyResolution/External/Complex") { prefix in
             XCTAssertBuilds(prefix.appending(component: "app"))
-            let output = try POSIX.popen([prefix.appending(components: "app", ".build", "debug", "Dealer").asString], environment: [:])
+            let output = try Process.checkNonZeroExit(args: prefix.appending(components: "app", ".build", Destination.host.target, "debug", "Dealer").asString)
             XCTAssertEqual(output, "♣︎K\n♣︎Q\n♣︎J\n♣︎10\n♣︎9\n♣︎8\n♣︎7\n♣︎6\n♣︎5\n♣︎4\n")
         }
     }

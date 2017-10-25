@@ -31,10 +31,11 @@ class PackageGraphTests: XCTestCase {
           "/Overrides.xcconfig"
       )
 
-        let g = try loadMockPackageGraph([
+        let diagnostics = DiagnosticsEngine()
+        let g = loadMockPackageGraph([
             "/Foo": Package(name: "Foo"),
             "/Bar": Package(name: "Bar", dependencies: [.Package(url: "/Foo", majorVersion: 1)]),
-        ], root: "/Bar", in: fs)
+        ], root: "/Bar", diagnostics: diagnostics, in: fs)
 
         let options = XcodeprojOptions(xcconfigOverrides: AbsolutePath("/Overrides.xcconfig"))
         
@@ -54,6 +55,7 @@ class PackageGraphTests: XCTestCase {
                 "Sources/Sea/include/Sea.h",
                 "Sources/Sea/include/module.modulemap",
                 "Tests/BarTests/barTests.swift",
+                "Dependencies/Foo 1.0.0/Package.swift",
                 "Dependencies/Foo 1.0.0/foo.swift",
                 "Products/Foo.framework",
                 "Products/Sea2.framework",
@@ -81,7 +83,7 @@ class PackageGraphTests: XCTestCase {
             result.check(target: "Bar") { targetResult in
                 targetResult.check(productType: .framework)
                 targetResult.check(dependencies: ["Foo"])
-                XCTAssertEqual(targetResult.commonBuildSettings.LD_RUNPATH_SEARCH_PATHS ?? [], ["$(TOOLCHAIN_DIR)/usr/lib/swift/macosx"])
+                XCTAssertEqual(targetResult.commonBuildSettings.LD_RUNPATH_SEARCH_PATHS ?? [], ["$(inherited)", "$(TOOLCHAIN_DIR)/usr/lib/swift/macosx"])
                 XCTAssertEqual(targetResult.commonBuildSettings.SKIP_INSTALL, "YES")
                 XCTAssertEqual(targetResult.target.buildSettings.xcconfigFileRef?.path, "../Overrides.xcconfig")
             }
@@ -105,12 +107,46 @@ class PackageGraphTests: XCTestCase {
             result.check(target: "BarTests") { targetResult in
                 targetResult.check(productType: .unitTest)
                 targetResult.check(dependencies: ["Bar", "Foo"])
-                XCTAssertEqual(targetResult.commonBuildSettings.LD_RUNPATH_SEARCH_PATHS ?? [], ["@loader_path/../Frameworks", "@loader_path/Frameworks"])
+                XCTAssertEqual(targetResult.commonBuildSettings.LD_RUNPATH_SEARCH_PATHS ?? [], ["$(inherited)", "@loader_path/../Frameworks", "@loader_path/Frameworks"])
                 XCTAssertEqual(targetResult.target.buildSettings.xcconfigFileRef?.path, "../Overrides.xcconfig")
+            }
+
+            result.check(target: "FooPackageDescription") { targetResult in
+                targetResult.check(productType: .framework)
+                targetResult.check(dependencies: [])
+            }
+
+            result.check(target: "BarPackageDescription") { targetResult in
+                targetResult.check(productType: .framework)
+                targetResult.check(dependencies: [])
             }
         }
     }
 
+    func testAggregateTarget() throws {
+        let fs = InMemoryFileSystem(emptyFiles:
+            "/Foo/Sources/Foo/source.swift"
+        )
+        let diagnostics = DiagnosticsEngine()
+        let g = loadMockPackageGraph4([
+            "/Foo": .init(
+                name: "Foo",
+                products: [.library(name: "Bar", type: .dynamic, targets: ["Foo"])],
+                targets: [.target(name: "Foo")]),
+        ], root: "/Foo", diagnostics: diagnostics, in: fs)
+        let project = try xcodeProject(xcodeprojPath: AbsolutePath("/Foo/build").appending(component: "xcodeproj"), graph: g, extraDirs: [], options: XcodeprojOptions(), fileSystem: fs)
+        XcodeProjectTester(project) { result in
+            result.check(target: "Foo") { targetResult in
+                targetResult.check(productType: .framework)
+                targetResult.check(dependencies: [])
+            }
+            result.check(target: "Bar") { targetResult in
+                targetResult.check(productType: nil)
+                targetResult.check(dependencies: ["Foo"])
+            }
+        }
+    }
+    
     func testModulemap() throws {
       let fs = InMemoryFileSystem(emptyFiles:
           "/Bar/Sources/Sea/include/Sea.h",
@@ -120,9 +156,10 @@ class PackageGraphTests: XCTestCase {
           "/Bar/Sources/Sea2/Sea2.c",
           "/Bar/Sources/swift/main.swift"
       )
-      let g = try loadMockPackageGraph([
+      let diagnostics = DiagnosticsEngine()
+      let g = loadMockPackageGraph([
           "/Bar": Package(name: "Bar", targets: [Target(name: "swift", dependencies: ["Sea", "Sea2"])]),
-      ], root: "/Bar", in: fs)
+      ], root: "/Bar", diagnostics: diagnostics, in: fs)
       let project = try xcodeProject(xcodeprojPath: AbsolutePath("/Bar/build").appending(component: "xcodeproj"), graph: g, extraDirs: [], options: XcodeprojOptions(), fileSystem: fs)
 
       XcodeProjectTester(project) { result in
@@ -152,9 +189,10 @@ class PackageGraphTests: XCTestCase {
             "/Pkg/Tests/LibraryTests/aTest.swift"
         )
         
-        let g = try loadMockPackageGraph([
+        let diagnostics = DiagnosticsEngine()
+        let g = loadMockPackageGraph([
             "/Pkg": Package(name: "Pkg", targets: [Target(name: "LibraryTests", dependencies: ["Library", "HelperTool"])]),
-            ], root: "/Pkg", in: fs)
+            ], root: "/Pkg", diagnostics: diagnostics, in: fs)
         
         let project = try xcodeProject(xcodeprojPath: AbsolutePath.root.appending(component: "xcodeproj"), graph: g, extraDirs: [], options: XcodeprojOptions(), fileSystem: fs)
         
@@ -188,9 +226,10 @@ class PackageGraphTests: XCTestCase {
     }
     
     static var allTests = [
+        ("testAggregateTarget", testAggregateTarget),
         ("testBasics", testBasics),
-        ("testModulemap", testModulemap),
         ("testModuleLinkage", testModuleLinkage),
+        ("testModulemap", testModulemap),
     ]
 }
 
@@ -234,7 +273,7 @@ private class XcodeProjectResult {
             self.target = target
         }
 
-        func check(productType: Xcode.Target.ProductType, file: StaticString = #file, line: UInt = #line) {
+        func check(productType: Xcode.Target.ProductType?, file: StaticString = #file, line: UInt = #line) {
             XCTAssertEqual(target.productType, productType, file: file, line: line)
         }
 
@@ -254,7 +293,7 @@ extension Xcode.Reference {
         if path.isEmpty {
             return ""
         }
-        if path.characters.first == "/" {
+        if path.first == "/" {
             return AbsolutePath(path).basename
         }
         return RelativePath(path).basename

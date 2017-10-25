@@ -13,3 +13,5 @@
 #else
 @_exported import Darwin.C
 #endif
+
+@_exported import clibc

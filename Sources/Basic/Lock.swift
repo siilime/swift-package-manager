@@ -13,14 +13,14 @@ import libc
 
 /// A simple lock wrapper.
 public struct Lock {
-    private var _lock = NSLock()
+    private let _lock = NSLock()
 
     /// Create a new lock.
     public init() {
     }
-    
+
     /// Execute the given block while holding the lock.
-    public mutating func withLock<T> (_ body: () throws -> T) rethrows -> T {
+    public func withLock<T> (_ body: () throws -> T) rethrows -> T {
         _lock.lock()
         defer { _lock.unlock() }
         return try body()
@@ -42,7 +42,7 @@ public final class FileLock {
     let cachePath: AbsolutePath
 
     /// File descriptor to the lock file.
-    private var fd: Int32? = nil
+    private var fd: Int32?
 
     /// Path to the lock file.
     private var lockFile: AbsolutePath {

@@ -16,10 +16,12 @@ import CommandsTests
 import FunctionalTests
 import POSIXTests
 import PackageDescriptionTests
+import PackageDescription4Tests
 import PackageGraphTests
 import PackageLoadingTests
 import PackageModelTests
 import SourceControlTests
+import TestSupportTests 
 import UtilityTests
 import WorkspaceTests 
 import XcodeprojTests
@@ -31,10 +33,12 @@ tests += CommandsTests.allTests()
 tests += FunctionalTests.allTests()
 tests += POSIXTests.allTests()
 tests += PackageDescriptionTests.allTests()
+tests += PackageDescription4Tests.allTests()
 tests += PackageGraphTests.allTests()
 tests += PackageLoadingTests.allTests()
 tests += PackageModelTests.allTests()
 tests += SourceControlTests.allTests()
+tests += TestSupportTests.allTests()
 tests += UtilityTests.allTests()
 tests += WorkspaceTests.allTests()
 tests += XcodeprojTests.allTests()

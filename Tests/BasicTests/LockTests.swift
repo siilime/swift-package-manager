@@ -16,7 +16,7 @@ import TestSupport
 class LockTests: XCTestCase {
     func testBasics() {
         // FIXME: Make this a more interesting test once we have concurrency primitives.
-        var lock = Basic.Lock()
+        let lock = Basic.Lock()
         var count = 0
         let N = 100
         for _ in 0..<N {
@@ -31,7 +31,7 @@ class LockTests: XCTestCase {
         // Shared resource file.
         let sharedResource = try TemporaryFile()
         // Directory where lock file should be created.
-        let tempDir = try TemporaryDirectory()
+        let tempDir = try TemporaryDirectory(removeTreeOnDeinit: true)
 
         // Run the same executable multiple times and
         // we can expect the final result to be sum of the

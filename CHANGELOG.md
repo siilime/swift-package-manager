@@ -1,5 +1,15 @@
 Note: This is in reverse chronological order, so newer entries are added to the top.
 
+Swift 4.0
+---------
+
+* The generated Xcode project creates a dummy target which provides
+  autocompletion for the manifest files. The name of the dummy target is in
+  format: `<PackageName>PackageDescription`.
+
+* `--specifier` option for `swift test` is now deprecated.
+  Use `--filter` instead which supports regex.
+
 Swift 3.0
 ---------
 

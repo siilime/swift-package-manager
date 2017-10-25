@@ -18,37 +18,76 @@ import Utility
 import class Foundation.Bundle
 #endif
 
-public func XCTAssertBuilds(_ path: AbsolutePath, configurations: Set<Configuration> = [.Debug, .Release], file: StaticString = #file, line: UInt = #line, Xcc: [String] = [], Xld: [String] = [], Xswiftc: [String] = [], env: [String: String]? = nil) {
+public func XCTAssertBuilds(
+    _ path: AbsolutePath,
+    configurations: Set<Configuration> = [.Debug, .Release],
+    file: StaticString = #file,
+    line: UInt = #line,
+    Xcc: [String] = [],
+    Xld: [String] = [],
+    Xswiftc: [String] = [],
+    env: [String: String]? = nil
+) {
     for conf in configurations {
         do {
             print("    Building \(conf)")
-            _ = try executeSwiftBuild(path, configuration: conf, printIfError: true, Xcc: Xcc, Xld: Xld, Xswiftc: Xswiftc, env: env)
+            _ = try executeSwiftBuild(
+                path,
+                configuration: conf,
+                printIfError: true,
+                Xcc: Xcc,
+                Xld: Xld,
+                Xswiftc: Xswiftc,
+                env: env)
         } catch {
-            XCTFail("`swift build -c \(conf)' failed:\n\n\(error)\n", file: file, line: line)
+            XCTFail("""
+                `swift build -c \(conf)' failed:
+                
+                \(error)
+
+                """, file: file, line: line)
         }
     }
 }
 
-public func XCTAssertSwiftTest(_ path: AbsolutePath, file: StaticString = #file, line: UInt = #line, env: [String: String]? = nil) {
+public func XCTAssertSwiftTest(
+    _ path: AbsolutePath,
+    file: StaticString = #file,
+    line: UInt = #line,
+    env: [String: String]? = nil
+) {
     do {
-        _ = try SwiftPMProduct.SwiftTest.execute([], chdir: path, env: env, printIfError: true)
+        _ = try SwiftPMProduct.SwiftTest.execute([], packagePath: path, env: env, printIfError: true)
     } catch {
-        XCTFail("`swift test' failed:\n\n\(error)\n", file: file, line: line)
+        XCTFail("""
+            `swift test' failed:
+            
+            \(error)
+
+            """, file: file, line: line)
     }
 }
 
-public func XCTAssertBuildFails(_ path: AbsolutePath, file: StaticString = #file, line: UInt = #line, Xcc: [String] = [], Xld: [String] = [], Xswiftc: [String] = [], env: [String: String]? = nil) {
+public func XCTAssertBuildFails(
+    _ path: AbsolutePath,
+    file: StaticString = #file,
+    line: UInt = #line,
+    Xcc: [String] = [],
+    Xld: [String] = [],
+    Xswiftc: [String] = [],
+    env: [String: String]? = nil
+) {
     do {
         _ = try executeSwiftBuild(path, Xcc: Xcc, Xld: Xld, Xswiftc: Xswiftc)
 
         XCTFail("`swift build' succeeded but should have failed", file: file, line: line)
 
-    } catch SwiftPMProductError.executionFailure(let error, _) {
+    } catch SwiftPMProductError.executionFailure(let error, _, _) {
         switch error {
-        case POSIX.Error.exitStatus(let status, _) where status == 1: break
-            // noop
+        case ProcessResult.Error.nonZeroExit(let result) where result.exitStatus != .terminated(code: 0):
+            break
         default:
-        XCTFail("`swift build' failed in an unexpected manner")
+            XCTFail("`swift build' failed in an unexpected manner")
         }
     } catch {
         XCTFail("`swift build' failed in an unexpected manner")
@@ -73,7 +112,12 @@ public func XCTAssertNoSuchPath(_ path: AbsolutePath, file: StaticString = #file
     }
 }
 
-public func XCTAssertThrows<T: Swift.Error>(_ expectedError: T, file: StaticString = #file, line: UInt = #line, _ body: () throws -> ()) where T: Equatable {
+public func XCTAssertThrows<T: Swift.Error>(
+    _ expectedError: T,
+    file: StaticString = #file,
+    line: UInt = #line,
+    _ body: () throws -> Void
+) where T: Equatable {
     do {
         try body()
         XCTFail("body completed successfully", file: file, line: line)
@@ -84,3 +128,24 @@ public func XCTAssertThrows<T: Swift.Error>(_ expectedError: T, file: StaticStri
     }
 }
 
+public func XCTNonNil<T>( 
+   _ optional: T?,
+   file: StaticString = #file,
+   line: UInt = #line,
+   _ body: (T) throws -> Void
+) {
+    guard let optional = optional else {
+        return XCTFail("Unexpected nil value", file: file, line: line)
+    }
+    do {
+        try body(optional)
+    } catch {
+        XCTFail("Unexpected error \(error)", file: file, line: line)
+    }
+}
+
+public func XCTAssertNoDiagnostics(_ engine: DiagnosticsEngine, file: StaticString = #file, line: UInt = #line) {
+    if engine.diagnostics.isEmpty { return }
+    let diagnostics = engine.diagnostics.map({ "- " + $0.localizedDescription }).joined(separator: "\n")
+    XCTFail("Found unexpected diagnostics: \n\(diagnostics)", file: file, line: line)
+}

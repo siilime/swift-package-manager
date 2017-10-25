@@ -25,7 +25,7 @@ public enum JSON {
 
     /// A boolean value.
     case bool(Bool)
-    
+
     /// An integer value.
     ///
     /// While not strictly present in JSON, we use this as a convenience to
@@ -43,11 +43,14 @@ public enum JSON {
 
     /// A dictionary.
     case dictionary([String: JSON])
+
+    /// An ordered dictionary.
+    case orderedDictionary(DictionaryLiteral<String, JSON>)
 }
 
 /// A JSON representation of an element.
 public protocol JSONSerializable {
-    
+
     /// Return a JSON representation.
     func toJSON() -> JSON
 }
@@ -62,28 +65,32 @@ extension JSON: CustomStringConvertible {
         case .string(let value): return value.debugDescription
         case .array(let values): return values.description
         case .dictionary(let values): return values.description
+        case .orderedDictionary(let values): return values.description
         }
     }
 }
 
 /// Equatable conformance.
-extension JSON: Equatable { }
-public func ==(lhs: JSON, rhs: JSON) -> Bool {
-    switch (lhs, rhs) {
-    case (.null, .null): return true
-    case (.null, _): return false
-    case (.bool(let a), .bool(let b)): return a == b
-    case (.bool, _): return false
-    case (.int(let a), .int(let b)): return a == b
-    case (.int, _): return false
-    case (.double(let a), .double(let b)): return a == b
-    case (.double, _): return false
-    case (.string(let a), .string(let b)): return a == b
-    case (.string, _): return false
-    case (.array(let a), .array(let b)): return a == b
-    case (.array, _): return false
-    case (.dictionary(let a), .dictionary(let b)): return a == b
-    case (.dictionary, _): return false
+extension JSON: Equatable {
+    public static func == (lhs: JSON, rhs: JSON) -> Bool {
+        switch (lhs, rhs) {
+        case (.null, .null): return true
+        case (.null, _): return false
+        case (.bool(let a), .bool(let b)): return a == b
+        case (.bool, _): return false
+        case (.int(let a), .int(let b)): return a == b
+        case (.int, _): return false
+        case (.double(let a), .double(let b)): return a == b
+        case (.double, _): return false
+        case (.string(let a), .string(let b)): return a == b
+        case (.string, _): return false
+        case (.array(let a), .array(let b)): return a == b
+        case (.array, _): return false
+        case (.dictionary(let a), .dictionary(let b)): return a == b
+        case (.dictionary, _): return false
+        case (.orderedDictionary(let a), .orderedDictionary(let b)): return a == b
+        case (.orderedDictionary, _): return false
+        }
     }
 }
 
@@ -94,9 +101,12 @@ extension JSON {
     public func toBytes(prettyPrint: Bool = false) -> ByteString {
         let stream = BufferedOutputByteStream()
         write(to: stream, indent: prettyPrint ? 0 : nil)
+        if prettyPrint {
+            stream.write("\n")
+        }
         return stream.bytes
     }
-    
+
     /// Encode a JSON item into a JSON string
     public func toString(prettyPrint: Bool = false) -> String {
         guard let contents = self.toBytes(prettyPrint: prettyPrint).asString else {
@@ -114,7 +124,7 @@ extension JSON: ByteStreamable {
 
     public func write(to stream: OutputByteStream, indent: Int?) {
         func indentStreamable(offset: Int? = nil) -> ByteStreamable {
-            return Format.asRepeating(string: " ", count: indent.flatMap {$0 + (offset ?? 0)} ?? 0)
+            return Format.asRepeating(string: " ", count: indent.flatMap({ $0 + (offset ?? 0) }) ?? 0)
         }
         let shouldIndent = indent != nil
         switch self {
@@ -134,7 +144,7 @@ extension JSON: ByteStreamable {
             for (i, item) in contents.enumerated() {
                 if i != 0 { stream <<< "," <<< (shouldIndent ? "\n" : " ") }
                 stream <<< indentStreamable(offset: 2)
-                item.write(to: stream, indent: indent.flatMap {$0 + 2})
+                item.write(to: stream, indent: indent.flatMap({ $0 + 2 }))
             }
             stream <<< (shouldIndent ? "\n" : "") <<< indentStreamable() <<< "]"
         case .dictionary(let contents):
@@ -142,8 +152,16 @@ extension JSON: ByteStreamable {
             stream <<< "{" <<< (shouldIndent ? "\n" : "")
             for (i, key) in contents.keys.sorted().enumerated() {
                 if i != 0 { stream <<< "," <<< (shouldIndent ? "\n" : " ") }
-                stream <<<  indentStreamable(offset: 2) <<< Format.asJSON(key) <<< ": " 
-                contents[key]!.write(to: stream, indent: indent.flatMap{ $0 + 2})
+                stream <<< indentStreamable(offset: 2) <<< Format.asJSON(key) <<< ": "
+                contents[key]!.write(to: stream, indent: indent.flatMap({ $0 + 2 }))
+            }
+            stream <<< (shouldIndent ? "\n" : "") <<< indentStreamable() <<< "}"
+        case .orderedDictionary(let contents):
+            stream <<< "{" <<< (shouldIndent ? "\n" : "")
+            for (i, item) in contents.enumerated() {
+                if i != 0 { stream <<< "," <<< (shouldIndent ? "\n" : " ") }
+                stream <<< indentStreamable(offset: 2) <<< Format.asJSON(item.key) <<< ": "
+                item.value.write(to: stream, indent: indent.flatMap({ $0 + 2 }))
             }
             stream <<< (shouldIndent ? "\n" : "") <<< indentStreamable() <<< "}"
         }
@@ -172,7 +190,7 @@ extension JSON {
     private static func convertToJSON(_ object: Any) -> JSON {
         switch object {
         case is NSNull:
-            return .null            
+            return .null
         case let value as String:
             return .string(value)
 
@@ -203,9 +221,11 @@ extension JSON {
             return .array(value.map(convertToJSON))
         case let value as NSDictionary:
             var result = [String: JSON]()
-            value.forEach { result[$0 as! String] = convertToJSON($1) }
+            for (key, val) in value {
+                result[key as! String] = convertToJSON(val)
+            }
             return .dictionary(result)
-            
+
             // On Linux, the JSON deserialization handles this.
         case let asBool as Bool: // This is true on Linux.
             return .bool(asBool)
@@ -217,21 +237,23 @@ extension JSON {
             return .array(value.map(convertToJSON))
         case let value as [String: Any]:
             var result = [String: JSON]()
-            value.forEach { result[$0] = convertToJSON($1) }
+            for (key, val) in value {
+                result[key] = convertToJSON(val)
+            }
             return .dictionary(result)
 
         default:
             fatalError("unexpected object: \(object) \(type(of: object))")
         }
     }
-    
+
     /// Load a JSON item from a byte string.
     ///
     //
     public init(bytes: ByteString) throws {
         do {
             let result = try JSONSerialization.jsonObject(with: Data(bytes: bytes.contents), options: [.allowFragments])
-            
+
             // Convert to a native representation.
             //
             // FIXME: This is inefficient; eventually, we want a way to do the
@@ -249,5 +271,70 @@ extension JSON {
     public init(string: String) throws {
         let bytes = ByteString(encodingAsUTF8: string)
         try self.init(bytes: bytes)
+    }
+}
+
+// MARK: - JSONSerializable helpers.
+
+extension JSON {
+    public init(_ dict: [String: JSONSerializable]) {
+        self = .dictionary(Dictionary(items: dict.map({ ($0.0, $0.1.toJSON()) })))
+    }
+}
+
+extension Int: JSONSerializable {
+    public func toJSON() -> JSON {
+        return .int(self)
+    }
+}
+
+extension Double: JSONSerializable {
+    public func toJSON() -> JSON {
+        return .double(self)
+    }
+}
+
+extension String: JSONSerializable {
+    public func toJSON() -> JSON {
+        return .string(self)
+    }
+}
+
+extension Bool: JSONSerializable {
+    public func toJSON() -> JSON {
+        return .bool(self)
+    }
+}
+
+extension AbsolutePath: JSONSerializable {
+    public func toJSON() -> JSON {
+        return .string(asString)
+    }
+}
+
+extension RelativePath: JSONSerializable {
+    public func toJSON() -> JSON {
+        return .string(asString)
+    }
+}
+
+extension Optional where Wrapped: JSONSerializable {
+    public func toJSON() -> JSON {
+        switch self {
+        case .some(let wrapped): return wrapped.toJSON()
+        case .none: return .null
+        }
+    }
+}
+
+extension Sequence where Iterator.Element: JSONSerializable {
+    public func toJSON() -> JSON {
+        return .array(map({ $0.toJSON() }))
+    }
+}
+
+extension JSON: JSONSerializable {
+    public func toJSON() -> JSON {
+        return self
     }
 }

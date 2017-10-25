@@ -8,12 +8,13 @@
  See http://swift.org/CONTRIBUTORS.txt for Swift project authors
 */
 
-import func POSIX.getenv
+import class Foundation.ProcessInfo
+import Basic
 
 extension Version {
     static func vprefix(_ string: String) -> Version? {
-        if string.characters.first == "v" {
-            return Version(string: String(string.characters.dropFirst()))
+        if string.first == "v" {
+            return Version(string: String(string.dropFirst()))
         } else {
             return nil
         }
@@ -27,7 +28,7 @@ public class Git {
         var knownVersions: [Version: String] = [:]
         for versionSpecificKey in Versioning.currentVersionSpecificKeys {
             for tag in tags where tag.hasSuffix(versionSpecificKey) {
-                let specifier = String(tag.characters.dropLast(versionSpecificKey.characters.count))
+                let specifier = String(tag.dropLast(versionSpecificKey.count))
                 if let version = Version(string: specifier) ?? Version.vprefix(specifier) {
                     knownVersions[version] = tag
                 }
@@ -38,7 +39,7 @@ public class Git {
                 return knownVersions
             }
         }
-            
+
         // Otherwise, look for normal tags.
         for tag in tags {
             if let version = Version(string: tag) {
@@ -59,7 +60,28 @@ public class Git {
         return knownVersions
     }
 
-    public class var tool: String {
-        return getenv("SWIFT_GIT") ?? "git"
+    /// A shell command to run for Git. Can be either a name or a path.
+    public static var tool: String = "git"
+
+    /// Returns true if the git reference name is well formed.
+    public static func checkRefFormat(ref: String) -> Bool {
+        do {
+            let result = try Process.popen(args: "git", "check-ref-format", "--allow-onelevel", ref)
+            return result.exitStatus == .terminated(code: 0)
+        } catch {
+            return false
+        }
+    }
+
+    /// Returns the environment variables for launching the git subprocess.
+    ///
+    /// This contains the current environment with custom overrides for using
+    /// git from swift build.
+    public static var environment: [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        // Disable terminal prompts in git. This will make git error out and return
+        // when it needs a user/pass etc instead of hanging the terminal (SR-3981).
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        return env
     }
 }

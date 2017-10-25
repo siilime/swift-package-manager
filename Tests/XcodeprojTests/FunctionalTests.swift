@@ -10,8 +10,9 @@
 
 import XCTest
 
-import TestSupport
 import Basic
+import Commands
+import TestSupport
 import PackageModel
 import Utility
 import Xcodeproj
@@ -37,8 +38,7 @@ class FunctionalTests: XCTestCase {
             XCTAssertXcodeprojGen(prefix)
             let pbx = prefix.appending(component: "SwiftCMixed.xcodeproj")
             XCTAssertDirectoryExists(pbx)
-            // Ensure we have plists for library and test targets.
-            XCTAssertFileExists(pbx.appending(component: "SeaLibTests_Info.plist"))
+            // Ensure we have plist for the library target.
             XCTAssertFileExists(pbx.appending(component: "SeaLib_Info.plist"))
 
             XCTAssertXcodeBuild(project: pbx)
@@ -56,26 +56,26 @@ class FunctionalTests: XCTestCase {
             let systemModule = prefix.appending(component: "SystemModule")
             // Create a shared library.
             let input = systemModule.appending(components: "Sources", "SystemModule.c")
-            let output =  systemModule.appending(component: "libSystemModule.\(Product.dynamicLibraryExtension)")
+            let output =  systemModule.appending(component: "libSystemModule.dylib")
             try systemQuietly(["clang", "-shared", input.asString, "-o", output.asString])
 
             let pcFile = prefix.appending(component: "libSystemModule.pc")
             try! write(path: pcFile) { stream in
-                stream <<< "prefix=\(prefix.appending(component: "SystemModule").asString)\n"
-                stream <<< "exec_prefix=${prefix}\n"
-                stream <<< "libdir=${exec_prefix}\n"
-                stream <<< "includedir=${prefix}/Sources/include\n"
-
-                stream <<< "Name: SystemModule\n"
-                stream <<< "URL: http://127.0.0.1/\n"
-                stream <<< "Description: The one and only SystemModule\n"
-                stream <<< "Version: 1.10.0\n"
-                stream <<< "Cflags: -I${includedir}\n"
-                stream <<< "Libs: -L${libdir} -lSystemModule\n"
+                stream <<< """
+                    prefix=\(prefix.appending(component: "SystemModule").asString)
+                    exec_prefix=${prefix}
+                    libdir=${exec_prefix}
+                    includedir=${prefix}/Sources/include
+                    Name: SystemModule
+                    URL: http://127.0.0.1/
+                    Description: The one and only SystemModule
+                    Version: 1.10.0
+                    Cflags: -I${includedir}
+                    Libs: -L${libdir} -lSystemModule
+                    """
             }
             let moduleUser = prefix.appending(component: "SystemModuleUser")
             let env = ["PKG_CONFIG_PATH": prefix.asString]
-            XCTAssertBuilds(moduleUser, env: env)
             XCTAssertXcodeprojGen(moduleUser, env: env)
             let pbx = moduleUser.appending(component: "SystemModuleUser.xcodeproj")
             XCTAssertDirectoryExists(pbx)
@@ -102,7 +102,7 @@ class FunctionalTests: XCTestCase {
     
     func testSystemModule() {
 #if os(macOS)
-        // Because there isn't any one system module that we can depend on for testing purposes, we build our own.
+        // Because there isn't any one system target that we can depend on for testing purposes, we build our own.
         try! write(path: AbsolutePath("/tmp/fake.h")) { stream in
             stream <<< "extern const char GetFakeString(void);\n"
         }
@@ -113,8 +113,6 @@ class FunctionalTests: XCTestCase {
             args: "env", "-u", "TOOLCHAINS", "xcrun", "clang", "-dynamiclib", "/tmp/fake.c", "-o", "/tmp/libfake.dylib")
         // Now we use a fixture for both the system library wrapper and the text executable.
         fixture(name: "Miscellaneous/SystemModules") { prefix in
-            XCTAssertBuilds(prefix.appending(component: "TestExec"), Xld: ["-L/tmp/"])
-            XCTAssertFileExists(prefix.appending(components: "TestExec", ".build", "debug", "TestExec"))
             let fakeDir = prefix.appending(component: "CFake")
             XCTAssertDirectoryExists(fakeDir)
             let execDir = prefix.appending(component: "TestExec")
@@ -143,17 +141,43 @@ func write(path: AbsolutePath, write: (OutputByteStream) -> Void) throws {
 
 func XCTAssertXcodeBuild(project: AbsolutePath, file: StaticString = #file, line: UInt = #line) {
     do {
+        var env = ProcessInfo.processInfo.environment
+        // Use the default toolchain if its not explicitly set.
+        if env["TOOLCHAINS"] == nil {
+            env["TOOLCHAINS"] = "default"
+        }
+        let xcconfig = project.appending(component: "overrides.xcconfig")
+        let swiftCompilerPath = Resources.default.swiftCompiler
+
+        // Override path to the Swift compiler.
+        let stream = BufferedOutputByteStream()
+        stream <<< "SWIFT_EXEC = " <<< swiftCompilerPath.asString <<< "\n"
+
+        // Override Swift libary path, if present.
+        let swiftLibraryPath = resolveSymlinks(swiftCompilerPath).appending(components: "..", "..", "lib", "swift", "macosx")
+        if localFileSystem.exists(swiftCompilerPath) {
+            stream <<< "SWIFT_LIBRARY_PATH = " <<< swiftLibraryPath.asString <<< "\n"
+        }
+        try localFileSystem.writeFileContents(xcconfig, bytes: stream.bytes)
+
         try Process.checkNonZeroExit(
-            args: "env", "-u", "TOOLCHAINS", "xcodebuild", "-project", project.asString, "-alltargets")
+            args: "xcodebuild", "-project", project.asString, "-alltargets", "-xcconfig", xcconfig.asString, environment: env)
     } catch {
         XCTFail("xcodebuild failed:\n\n\(error)\n", file: file, line: line)
+        switch error {
+        case ProcessResult.Error.nonZeroExit(let result):
+            try? print("stdout: " + result.utf8Output())
+            try? print("stderr: " + result.utf8stderrOutput())
+        default:
+            break
+        }
     }
 }
 
 func XCTAssertXcodeprojGen(_ prefix: AbsolutePath, flags: [String] = [], env: [String: String]? = nil, file: StaticString = #file, line: UInt = #line) {
     do {
         print("    Generating XcodeProject")
-        _ = try SwiftPMProduct.SwiftPackage.execute(flags + ["generate-xcodeproj"], chdir: prefix, env: env, printIfError: true)
+        _ = try SwiftPMProduct.SwiftPackage.execute(flags + ["generate-xcodeproj"], packagePath: prefix, env: env, printIfError: true)
     } catch {
         XCTFail("`swift package generate-xcodeproj' failed:\n\n\(error)\n", file: file, line: line)
     }

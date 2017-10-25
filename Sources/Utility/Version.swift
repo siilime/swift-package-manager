@@ -8,6 +8,8 @@
  See http://swift.org/CONTRIBUTORS.txt for Swift project authors
 */
 
+import Basic
+
 /// A struct representing a semver version.
 public struct Version {
 
@@ -24,36 +26,33 @@ public struct Version {
     public let prereleaseIdentifiers: [String]
 
     /// The build metadata.
-    public let buildMetadataIdentifier: String?
-    
+    public let buildMetadataIdentifiers: [String]
+
     /// Create a version object.
     public init(
         _ major: Int,
         _ minor: Int,
         _ patch: Int,
         prereleaseIdentifiers: [String] = [],
-        buildMetadataIdentifier: String? = nil
+        buildMetadataIdentifiers: [String] = []
     ) {
         precondition(major >= 0 && minor >= 0 && patch >= 0, "Negative versioning is invalid.")
         self.major = major
         self.minor = minor
         self.patch = patch
         self.prereleaseIdentifiers = prereleaseIdentifiers
-        self.buildMetadataIdentifier = buildMetadataIdentifier
+        self.buildMetadataIdentifiers = buildMetadataIdentifiers
     }
 }
 
 extension Version: Hashable {
 
-    static public func ==(lhs: Version, rhs: Version) -> Bool {
-        if lhs.major == rhs.major && 
-           lhs.minor == rhs.minor && 
-           lhs.patch == rhs.patch &&
-           lhs.prereleaseIdentifiers == rhs.prereleaseIdentifiers &&
-           lhs.buildMetadataIdentifier == rhs.buildMetadataIdentifier {
-            return true
-        }
-        return false
+    static public func == (lhs: Version, rhs: Version) -> Bool {
+        return lhs.major == rhs.major &&
+               lhs.minor == rhs.minor &&
+               lhs.patch == rhs.patch &&
+               lhs.prereleaseIdentifiers == rhs.prereleaseIdentifiers &&
+               lhs.buildMetadataIdentifiers == rhs.buildMetadataIdentifiers
     }
 
     public var hashValue: Int {
@@ -65,16 +64,18 @@ extension Version: Hashable {
         result = (result &* mul) ^ UInt64(bitPattern: Int64(minor.hashValue))
         result = (result &* mul) ^ UInt64(bitPattern: Int64(patch.hashValue))
         result = prereleaseIdentifiers.reduce(result, { ($0 &* mul) ^ UInt64(bitPattern: Int64($1.hashValue)) })
-        if let build = buildMetadataIdentifier {
-            result = (result &* mul) ^ UInt64(bitPattern: Int64(build.hashValue))
-        }
-        return Int(truncatingBitPattern: result)
+        result = buildMetadataIdentifiers.reduce(result, { ($0 &* mul) ^ UInt64(bitPattern: Int64($1.hashValue)) })
+        return Int(truncatingIfNeeded: result)
     }
 }
 
 extension Version: Comparable {
 
-    public static func <(lhs: Version, rhs: Version) -> Bool {
+    func isEqualWithoutPrerelease(_ other: Version) -> Bool {
+        return major == other.major && minor == other.minor && patch == other.patch
+    }
+
+    public static func < (lhs: Version, rhs: Version) -> Bool {
         let lhsComparators = [lhs.major, lhs.minor, lhs.patch]
         let rhsComparators = [rhs.major, rhs.minor, rhs.patch]
 
@@ -90,7 +91,8 @@ extension Version: Comparable {
             return true // Prerelease lhs < non-prerelease rhs 
         }
 
-        for (lhsPrereleaseIdentifier, rhsPrereleaseIdentifier) in zip(lhs.prereleaseIdentifiers, rhs.prereleaseIdentifiers) {
+        let zippedIdentifiers = zip(lhs.prereleaseIdentifiers, rhs.prereleaseIdentifiers)
+        for (lhsPrereleaseIdentifier, rhsPrereleaseIdentifier) in zippedIdentifiers {
             if lhsPrereleaseIdentifier == rhsPrereleaseIdentifier {
                 continue
             }
@@ -115,11 +117,11 @@ extension Version: Comparable {
 extension Version: CustomStringConvertible {
     public var description: String {
         var base = "\(major).\(minor).\(patch)"
-        if prereleaseIdentifiers.count > 0 {
+        if !prereleaseIdentifiers.isEmpty {
             base += "-" + prereleaseIdentifiers.joined(separator: ".")
         }
-        if let buildMetadataIdentifier = buildMetadataIdentifier {
-            base += "+" + buildMetadataIdentifier
+        if !buildMetadataIdentifiers.isEmpty {
+            base += "+" + buildMetadataIdentifiers.joined(separator: ".")
         }
         return base
     }
@@ -132,39 +134,33 @@ public extension Version {
     /// - Parameters:
     ///   - string: The string to parse.
     init?(string: String) {
-        let characters = string.characters
-        let prereleaseStartIndex = characters.index(of: "-")
-        let metadataStartIndex = characters.index(of: "+")
+        let prereleaseStartIndex = string.index(of: "-")
+        let metadataStartIndex = string.index(of: "+")
 
-        let requiredEndIndex = prereleaseStartIndex ?? metadataStartIndex ?? characters.endIndex
-        let requiredCharacters = characters.prefix(upTo: requiredEndIndex)
-        let requiredComponents = requiredCharacters.split(separator: ".", maxSplits: 2, omittingEmptySubsequences: false)
-            .map(String.init).flatMap{ Int($0) }.filter{ $0 >= 0 }
+        let requiredEndIndex = prereleaseStartIndex ?? metadataStartIndex ?? string.endIndex
+        let requiredCharacters = string.prefix(upTo: requiredEndIndex)
+        let requiredComponents = requiredCharacters
+            .split(separator: ".", maxSplits: 2, omittingEmptySubsequences: false)
+            .map(String.init).flatMap({ Int($0) }).filter({ $0 >= 0 })
 
-        guard requiredComponents.count == 3 else {
-            return nil
-        }
+        guard requiredComponents.count == 3 else { return nil }
 
         self.major = requiredComponents[0]
         self.minor = requiredComponents[1]
         self.patch = requiredComponents[2]
 
-        if let prereleaseStartIndex = prereleaseStartIndex {
-            let prereleaseEndIndex = metadataStartIndex ?? characters.endIndex
-            let prereleaseCharacters = characters[characters.index(after: prereleaseStartIndex)..<prereleaseEndIndex]
-            prereleaseIdentifiers = prereleaseCharacters.split(separator: ".").map{ String($0) }
-        } else {
-            prereleaseIdentifiers = []
+        func identifiers(start: String.Index?, end: String.Index) -> [String] {
+            guard let start = start else { return [] }
+            let identifiers = string[string.index(after: start)..<end]
+            return identifiers.split(separator: ".").map(String.init)
         }
 
-        var buildMetadataIdentifier: String? = nil
-        if let metadataStartIndex = metadataStartIndex {
-            let buildMetadataCharacters = characters.suffix(from: characters.index(after: metadataStartIndex))
-            if !buildMetadataCharacters.isEmpty {
-                buildMetadataIdentifier = String(buildMetadataCharacters)
-            }
-        }
-        self.buildMetadataIdentifier = buildMetadataIdentifier
+        self.prereleaseIdentifiers = identifiers(
+            start: prereleaseStartIndex,
+            end: metadataStartIndex ?? string.endIndex)
+        self.buildMetadataIdentifiers = identifiers(
+            start: metadataStartIndex,
+            end: string.endIndex)
     }
 }
 
@@ -183,5 +179,77 @@ extension Version: ExpressibleByStringLiteral {
 
     public init(unicodeScalarLiteral value: String) {
         self.init(stringLiteral: value)
+    }
+}
+
+extension Version: JSONMappable, JSONSerializable {
+    public init(json: JSON) throws {
+        guard case .string(let string) = json else {
+            throw JSON.MapError.custom(key: nil, message: "expected string, got \(json)")
+        }
+        guard let version = Version(string: string) else {
+            throw JSON.MapError.custom(key: nil, message: "Invalid version string \(string)")
+        }
+        self.init(
+            version.major, version.minor, version.patch,
+            prereleaseIdentifiers: version.prereleaseIdentifiers,
+            buildMetadataIdentifiers: version.buildMetadataIdentifiers
+        )
+    }
+
+    public func toJSON() -> JSON {
+        return .string(description)
+    }
+}
+
+// MARK:- Range operations
+
+extension ClosedRange where Bound == Version {
+    /// Marked as unavailable because we have custom rules for contains.
+    public func contains(_ element: Version) -> Bool {
+        // Unfortunately, we can't use unavailable here.
+        fatalError("contains(_:) is unavailable, use contains(version:)")
+    }
+}
+
+// Disabled because compiler hits an assertion https://bugs.swift.org/browse/SR-5014
+#if false
+extension CountableRange where Bound == Version {
+    /// Marked as unavailable because we have custom rules for contains.
+    public func contains(_ element: Version) -> Bool {
+        // Unfortunately, we can't use unavailable here.
+        fatalError("contains(_:) is unavailable, use contains(version:)")
+    }
+}
+#endif
+
+extension Range where Bound == Version {
+    /// Marked as unavailable because we have custom rules for contains.
+    public func contains(_ element: Version) -> Bool {
+        // Unfortunately, we can't use unavailable here.
+        fatalError("contains(_:) is unavailable, use contains(version:)")
+    }
+}
+
+extension Range where Bound == Version {
+
+    public func contains(version: Version) -> Bool {
+        // Special cases if version contains prerelease identifiers.
+        if !version.prereleaseIdentifiers.isEmpty {
+            // If the ranage does not contain prerelease identifiers, return false.
+            if lowerBound.prereleaseIdentifiers.isEmpty && upperBound.prereleaseIdentifiers.isEmpty {
+                return false
+            }
+
+            // At this point, one of the bounds contains prerelease identifiers.
+            //
+            // Reject 2.0.0-alpha when upper bound is 2.0.0.
+            if upperBound.prereleaseIdentifiers.isEmpty && upperBound.isEqualWithoutPrerelease(version) {
+                return false
+            }
+        }
+
+        // Otherwise, apply normal contains rules.
+        return version >= lowerBound && version < upperBound
     }
 }

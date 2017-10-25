@@ -14,7 +14,13 @@ import PackageModel
 import PackageGraph
 
 /// llbuild manifest file generator for a build plan.
-public struct LLbuildManifestGenerator {
+public struct LLBuildManifestGenerator {
+
+    /// The name of the llbuild target that builds all products and targets (excluding tests).
+    public static let llbuildMainTargetName = "main"
+
+    /// The name of the llbuild target that builds all products and targets (including tests).
+    public static let llbuildTestTargetName = "test"
 
     /// The build plan to work on.
     public let plan: BuildPlan
@@ -28,27 +34,44 @@ public struct LLbuildManifestGenerator {
     private struct Targets {
 
         /// Main target.
-        private(set) var main = Target(name: "main", cmds: [])
+        private(set) var main = Target(name: LLBuildManifestGenerator.llbuildMainTargetName)
 
         /// Test target.
-        private(set) var test = Target(name: "test", cmds: [])
+        private(set) var test = Target(name: LLBuildManifestGenerator.llbuildTestTargetName)
 
-        /// All commands.
-        private(set) var allCommands: [Command] = []
-
-        /// Append a command.
-        mutating func append(_ command: Command, isTest: Bool) {
-            append([command], isTest: isTest)
+        /// All targets.
+        var allTargets: [Target] {
+            return [main, test] + otherTargets.sorted(by: { $0.name < $1.name })
         }
 
-        /// Append an array of commands.
-        mutating func append(_ commands: [Command], isTest: Bool) {
+        /// All commands.
+        private(set) var allCommands = SortedArray<Command>(areInIncreasingOrder: <)
+
+        /// Other targets.
+        private var otherTargets: [Target] = []
+
+        /// Append a command.
+        mutating func append(_ target: Target, isTest: Bool) {
+            // Create a phony command with a virtual output node that represents the target.
+            let virtualNodeName = "<\(target.name)>"
+            let phonyTool = PhonyTool(inputs: target.outputs.values, outputs: [virtualNodeName])
+            let phonyCommand = Command(name: "<C.\(target.name)>", tool: phonyTool)
+
+            // Use the phony command as dependency.
+            var newTarget = target
+            newTarget.outputs.insert(virtualNodeName)
+            newTarget.cmds.insert(phonyCommand)
+            otherTargets.append(newTarget)
+
             if !isTest {
-                main.cmds += commands
+                main.outputs += newTarget.outputs
+                main.cmds += newTarget.cmds
             }
+
             // Always build everything for the test target.
-            test.cmds += commands
-            allCommands += commands
+            test.outputs += newTarget.outputs
+            test.cmds += newTarget.cmds
+            allCommands += newTarget.cmds
         }
     }
 
@@ -60,29 +83,32 @@ public struct LLbuildManifestGenerator {
         for buildTarget in plan.targets {
             switch buildTarget {
             case .swift(let target):
-                targets.append(createSwiftCommand(target), isTest: target.isTestTarget)
+                targets.append(createSwiftCompileTarget(target), isTest: target.isTestTarget)
             case .clang(let target):
-                targets.append(createClangCommands(target), isTest: target.isTestTarget)
+                targets.append(createClangCompileTarget(target), isTest: target.isTestTarget)
             }
         }
 
         // Create command for all products in the plan.
         for buildProduct in plan.buildProducts {
-            targets.append(createLinkCommand(buildProduct), isTest: buildProduct.product.type == .test)
+            targets.append(createProductTarget(buildProduct), isTest: buildProduct.product.type == .test)
         }
 
         // Write the manifest.
         let stream = BufferedOutputByteStream()
-        stream <<< "client:\n"
-        stream <<< "  name: swift-build\n"
-        stream <<< "tools: {}\n"
-        stream <<< "targets:\n"
-        for target in [targets.test, targets.main] {
-            stream <<< "  " <<< Format.asJSON(target.name) <<< ": " <<< Format.asJSON(target.cmds.flatMap{$0.tool.outputs}) <<< "\n"
+        stream <<< """
+            client:
+              name: swift-build
+            tools: {}
+            targets:\n
+            """
+        for target in targets.allTargets {
+            stream <<< "  " <<< Format.asJSON(target.name)
+            stream <<< ": " <<< Format.asJSON(target.outputs.values) <<< "\n"
         }
         stream <<< "default: " <<< Format.asJSON(targets.main.name) <<< "\n"
         stream <<< "commands: \n"
-        for command in targets.allCommands {
+        for command in targets.allCommands.sorted(by: { $0.name < $1.name }) {
             stream <<< "  " <<< Format.asJSON(command.name) <<< ":\n"
             command.tool.append(to: stream)
             stream <<< "\n"
@@ -90,42 +116,49 @@ public struct LLbuildManifestGenerator {
         try localFileSystem.writeFileContents(path, bytes: stream.bytes)
     }
 
-    /// Create link command for products.
-    private func createLinkCommand(_ buildProduct: ProductBuildDescription) -> Command {
+    /// Create a llbuild target for a product description.
+    private func createProductTarget(_ buildProduct: ProductBuildDescription) -> Target {
         let tool: ToolProtocol
         // Create archive tool for static library and shell tool for rest of the products.
         if buildProduct.product.type == .library(.static) {
-            tool = ArchiveTool(inputs: buildProduct.objects.map{$0.asString}, outputs: [buildProduct.binary.asString])
+            tool = ArchiveTool(
+                inputs: buildProduct.objects.map({ $0.asString }),
+                outputs: [buildProduct.binary.asString])
         } else {
-            let inputs = buildProduct.objects + buildProduct.dylibs.map{$0.binary}
+            let inputs = buildProduct.objects + buildProduct.dylibs.map({ $0.binary })
             tool = ShellTool(
                 description: "Linking \(buildProduct.binary.prettyPath)",
-                inputs: inputs.map{$0.asString},
+                inputs: inputs.map({ $0.asString }),
                 outputs: [buildProduct.binary.asString],
                 args: buildProduct.linkArguments())
         }
-        return Command(name: buildProduct.targetName, tool: tool)
+
+        var target = Target(name: buildProduct.product.llbuildTargetName)
+        target.outputs.insert(contentsOf: tool.outputs)
+        target.cmds.insert(Command(name: buildProduct.product.commandName, tool: tool))
+        return target
     }
 
-    /// Create command for Swift target description.
-    private func createSwiftCommand(_ target: SwiftTargetDescription) -> Command {
+    /// Create a llbuild target for a Swift target description.
+    private func createSwiftCompileTarget(_ target: SwiftTargetDescription) -> Target {
         // Compute inital inputs.
-        var inputs = target.module.sources.paths.map{ $0.asString }
+        var inputs = SortedArray<String>()
+        inputs += target.target.sources.paths.map({ $0.asString })
 
-        func addStaticTargetInputs(_ target: ResolvedModule) {
+        func addStaticTargetInputs(_ target: ResolvedTarget) {
             // Ignore C Modules.
-            if target.underlyingModule is CModule { return }
+            if target.underlyingTarget is CTarget { return }
             switch plan.targetMap[target] {
             case .swift(let target)?:
-                inputs += [target.moduleOutputPath.asString]
+                inputs.insert(target.moduleOutputPath.asString)
             case .clang(let target)?:
-                inputs += target.objects.map{$0.asString}
+                inputs += target.objects.map({ $0.asString })
             case nil:
                 fatalError("unexpected: target \(target) not in target map \(plan.targetMap)")
             }
         }
 
-        for dependency in target.module.dependencies {
+        for dependency in target.target.dependencies {
             switch dependency {
             case .target(let target):
                 addStaticTargetInputs(target)
@@ -138,7 +171,7 @@ public struct LLbuildManifestGenerator {
 
                 // For automatic and static libraries, add their targets as static input.
                 case .library(.automatic), .library(.static):
-                    for target in product.modules {
+                    for target in product.targets {
                         addStaticTargetInputs(target)
                     }
                 case .test:
@@ -147,86 +180,65 @@ public struct LLbuildManifestGenerator {
             }
         }
 
-        let tool = SwiftCompilerTool(target: target, inputs: inputs)
-        return Command(name: target.module.targetName, tool: tool)
+        var buildTarget = Target(name: target.target.llbuildTargetName)
+        // The target only cares about the module output.
+        buildTarget.outputs.insert(target.moduleOutputPath.asString)
+        let tool = SwiftCompilerTool(target: target, inputs: inputs.values)
+        buildTarget.cmds.insert(Command(name: target.target.commandName, tool: tool))
+        return buildTarget
     }
 
-    /// Create commands for Clang targets.
-    private func createClangCommands(_ target: ClangTargetDescription) -> [Command] {
-        return target.compilePaths().map { path in
+    /// Create a llbuild target for a Clang target description.
+    private func createClangCompileTarget(_ target: ClangTargetDescription) -> Target {
+        let commands: [Command] = target.compilePaths().map({ path in
             var args = target.basicArguments()
             args += ["-MD", "-MT", "dependencies", "-MF", path.deps.asString]
             args += ["-c", path.source.asString, "-o", path.object.asString]
-            let clang = ClangTool(desc: "Compile \(target.module.name) \(path.filename.asString)",
-                                  //FIXME: Should we add build time dependency on dependent modules?
-                                  inputs: [path.source.asString],
-                                  outputs: [path.object.asString],
-                                  args: [plan.buildParameters.toolchain.clangCompiler.asString] + args,
-                                  deps: path.deps.asString)
+            let clang = ClangTool(
+                desc: "Compile \(target.target.name) \(path.filename.asString)",
+                //FIXME: Should we add build time dependency on dependent targets?
+                inputs: [path.source.asString],
+                outputs: [path.object.asString],
+                args: [plan.buildParameters.toolchain.clangCompiler.asString] + args,
+                deps: path.deps.asString)
             return Command(name: path.object.asString, tool: clang)
-        }
+        })
+
+        // For Clang, the target requires all command outputs.
+        var buildTarget = Target(name: target.target.llbuildTargetName)            
+        buildTarget.outputs.insert(contentsOf: commands.flatMap({ $0.tool.outputs }))
+        buildTarget.cmds += commands
+        return buildTarget
     }
 }
 
-extension ResolvedModule {
-    var targetName: String {
-        return "<\(name).module>"
+extension ResolvedTarget {
+    public var llbuildTargetName: String {
+        return "\(name).module"
+    }
+
+    var commandName: String {
+        return "C.\(llbuildTargetName)"
     }
 }
 
-extension ProductBuildDescription {
-    public var targetName: String {
-        switch product.type {
+extension ResolvedProduct {
+    public var llbuildTargetName: String {
+        switch type {
         case .library(.dynamic):
-            return "<\(product.name).dylib>"
+            return "\(name).dylib"
         case .test:
-            return "<\(product.name).test>"
+            return "\(name).test"
         case .library(.static):
-            return "<\(product.name).a>"
+            return "\(name).a"
         case .library(.automatic):
             fatalError()
         case .executable:
-            return "<\(product.name).exe>"
+            return "\(name).exe"
         }
     }
-}
 
-/// Swift compiler llbuild tool.
-// FIXME: Remove the old SwiftcTool once we completely shift to the new Build model.
-struct SwiftCompilerTool: ToolProtocol {
-
-    /// Inputs to the tool.
-    let inputs: [String]
-
-    /// Outputs produced by the tool.
-    var outputs: [String] {
-        return target.objects.map{ $0.asString } + [target.moduleOutputPath.asString]
-    }
-
-    /// The underlying Swift build target.
-    let target: SwiftTargetDescription
-
-    static let numThreads = 8
-
-    init(target: SwiftTargetDescription, inputs: [String]) {
-        self.target = target
-        self.inputs = inputs
-    }
-
-    func append(to stream: OutputByteStream) {
-        stream <<< "    tool: swift-compiler\n"
-        stream <<< "    executable: " <<< Format.asJSON(target.buildParameters.toolchain.swiftCompiler.asString) <<< "\n"
-        stream <<< "    module-name: " <<< Format.asJSON(target.module.c99name) <<< "\n"
-        stream <<< "    module-output-path: " <<< Format.asJSON(target.moduleOutputPath.asString) <<< "\n"
-        stream <<< "    inputs: " <<< Format.asJSON(inputs) <<< "\n"
-        stream <<< "    outputs: " <<< Format.asJSON(outputs) <<< "\n"
-        stream <<< "    import-paths: " <<< Format.asJSON([target.buildParameters.buildPath.asString]) <<< "\n"
-        stream <<< "    temps-path: " <<< Format.asJSON(target.tempsPath.asString) <<< "\n"
-        stream <<< "    objects: " <<< Format.asJSON(target.objects.map{ $0.asString }) <<< "\n"
-        stream <<< "    other-args: " <<< Format.asJSON(target.compileArguments()) <<< "\n"
-        stream <<< "    sources: " <<< Format.asJSON(target.module.sources.paths.map{ $0.asString }) <<< "\n"
-        stream <<< "    is-library: " <<< Format.asJSON(target.module.type == .library || target.module.type == .test) <<< "\n"
-        stream <<< "    enable-whole-module-optimization: " <<< Format.asJSON(target.buildParameters.configuration == .release) <<< "\n"
-        stream <<< "    num-threads: " <<< Format.asJSON("\(SwiftCompilerTool.numThreads)") <<< "\n"
+    var commandName: String {
+        return "C.\(llbuildTargetName)"
     }
 }

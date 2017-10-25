@@ -16,9 +16,33 @@ import Utility
 
 import func POSIX.exit
 
+
+/// Diagnostics info for deprecated `--specifier` option.
+struct SpecifierDeprecatedDiagnostic: DiagnosticData {
+    static let id = DiagnosticID(
+        type: SpecifierDeprecatedDiagnostic.self,
+        name: "org.swift.diags.specifier-deprecated",
+        defaultBehavior: .warning,
+        description: {
+            $0 <<< "'--specifier' option is deprecated; use '--filter' instead"
+        }
+    )
+}
+
+/// Diagnostic data for zero --filter matches.
+struct NoMatchingTestsWarning: DiagnosticData {
+    static let id = DiagnosticID(
+        type: NoMatchingTestsWarning.self,
+        name: "org.swift.diags.no-matching-tests",
+        defaultBehavior: .note,
+        description: {
+            $0 <<< "'--filter' predicate did not match any test case"
+        }
+    )
+}
+
 private enum TestError: Swift.Error {
     case invalidListTestJSONData
-    case multipleTestProducts
     case testsExecutableNotFound
 }
 
@@ -26,11 +50,9 @@ extension TestError: CustomStringConvertible {
     var description: String {
         switch self {
         case .testsExecutableNotFound:
-            return "no tests found to execute, create a module in your `Tests' directory"
+            return "no tests found; create a target in the 'Tests' directory"
         case .invalidListTestJSONData:
-            return "Invalid list test JSON structure."
-        case .multipleTestProducts:
-            return "cannot test packages with multiple test products defined"
+            return "invalid list test JSON structure"
         }
     }
 }
@@ -39,41 +61,50 @@ public class TestToolOptions: ToolOptions {
     /// Returns the mode in with the tool command should run.
     var mode: TestMode {
         // If we got version option, just print the version and exit.
-        if printVersion {
+        if shouldPrintVersion {
             return .version
         }
-        // List the test cases.
-        if listTests {
+
+        if shouldRunInParallel {
+            return .runParallel
+        }
+
+        if shouldListTests {
             return .listTests
         }
-        // Run tests in parallel.
-        if parallel {
-            return .runInParallel
-        }
-        return .run(specifier)
+
+        return .runSerial
     }
 
     /// If the test target should be built before testing.
-    var buildTests = true
-
-    /// Build configuration.
-    var config: Build.Configuration = .debug
+    var shouldBuildTests = true
 
     /// If tests should run in parallel mode.
-    var parallel = false 
+    var shouldRunInParallel = false
 
     /// List the tests and exit.
-    var listTests = false 
-    
-    /// Run only these specified tests.
-    var specifier: String?
+    var shouldListTests = false
+
+    var testCaseSpecifier: TestCaseSpecifier = .none
+}
+
+/// Tests filtering specifier
+///
+/// This is used to filter tests to run
+///   .none     => No filtering
+///   .specific => Specify test with fully quantified name
+///   .regex    => RegEx pattern
+public enum TestCaseSpecifier {
+    case none
+    case specific(String)
+    case regex(String)
 }
 
 public enum TestMode {
     case version
     case listTests
-    case run(String?)
-    case runInParallel
+    case runSerial
+    case runParallel
 }
 
 /// swift-test tool namespace
@@ -89,32 +120,74 @@ public class SwiftTestTool: SwiftTool<TestToolOptions> {
     }
 
     override func runImpl() throws {
+
         switch options.mode {
         case .version:
             print(Versioning.currentVersion.completeDisplayString)
 
         case .listTests:
             let testPath = try buildTestsIfNeeded(options)
-            let testSuites = try SwiftTestTool.getTestSuites(path: testPath)
+            let testSuites = try getTestSuites(path: testPath)
+            let tests = testSuites.filteredTests(specifier: options.testCaseSpecifier)
+
             // Print the tests.
-            for testSuite in testSuites {
-                for testCase in testSuite.tests {
-                    for test in testCase.tests {
-                        print(testCase.name + "/" + test)
-                    }
+            for test in tests {
+                print(test.specifier)
+            }
+
+        case .runSerial:
+            let testPath = try buildTestsIfNeeded(options)
+            var ranSuccessfully = true
+
+            switch options.testCaseSpecifier {
+            case .none:
+                let runner = TestRunner(path: testPath, xctestArg: nil, processSet: processSet)
+                ranSuccessfully = runner.test()
+
+            case .regex, .specific:
+                // If old specifier `-s` option was used, emit deprecation notice.
+                if case .specific = options.testCaseSpecifier {
+                    diagnostics.emit(data: SpecifierDeprecatedDiagnostic())
+                }
+
+                // Find the tests we need to run.
+                let testSuites = try getTestSuites(path: testPath)
+                let tests = testSuites.filteredTests(specifier: options.testCaseSpecifier)
+
+                // If there were no matches, emit a warning.
+                if tests.isEmpty {
+                    diagnostics.emit(data: NoMatchingTestsWarning())
+                }
+
+                // Finally, run the tests.
+                for test in tests {
+                    let runner = TestRunner(path: testPath, xctestArg: test.specifier, processSet: processSet)
+                    ranSuccessfully = runner.test() && ranSuccessfully
                 }
             }
 
-        case .run(let specifier):
-            let testPath = try buildTestsIfNeeded(options)
-            let success: Bool = TestRunner(path: testPath, xctestArg: specifier, processSet: processSet).test()
-            exit(success ? 0 : 1)
+            if !ranSuccessfully {
+                executionStatus = .failure
+            }
 
-        case .runInParallel:
+        case .runParallel:
             let testPath = try buildTestsIfNeeded(options)
+            let testSuites = try getTestSuites(path: testPath)
+            let tests = testSuites.filteredTests(specifier: options.testCaseSpecifier)
+
+            // If there were no matches, emit a warning and exit.
+            if tests.isEmpty {
+                diagnostics.emit(data: NoMatchingTestsWarning())
+                return
+            }
+
+            // Run the tests using the parallel runner.
             let runner = ParallelTestRunner(testPath: testPath, processSet: processSet)
-            try runner.run()
-            exit(runner.success ? 0 : 1)
+            try runner.run(tests)
+
+            if !runner.ranSuccessfully {
+                executionStatus = .failure
+            }
         }
     }
 
@@ -122,57 +195,49 @@ public class SwiftTestTool: SwiftTool<TestToolOptions> {
     ///
     /// - Returns: The path to the test binary.
     private func buildTestsIfNeeded(_ options: TestToolOptions) throws -> AbsolutePath {
-        let graph = try loadPackage()
-        if options.buildTests {
-            try build(graph: graph, includingTests: true, config: options.config)
+        let buildPlan = try self.buildPlan()
+        if options.shouldBuildTests {
+            try build(plan: buildPlan, subset: .allIncludingTests)
         }
-                
-        // See the logic in `PackageLoading`'s `PackageExtensions.swift`.
-        //
-        // FIXME: We should also check if the package has any test
-        // modules, which isn't trivial (yet).
-        let testProducts = graph.products.filter{
-            if case .test = $0.type {
-                return true
-            } else {
-                return false
-            }
-        }
-        if testProducts.count == 0 {
+
+        guard let testProduct = buildPlan.buildProducts.first(where: { $0.product.type == .test }) else {
             throw TestError.testsExecutableNotFound
-        } else if testProducts.count > 1 {
-            throw TestError.multipleTestProducts
-        } else {
-            return buildPath.appending(RelativePath(options.config.dirname)).appending(component: testProducts[0].name + ".xctest")
         }
+
+        // Go up the folder hierarchy until we find the .xctest bundle.
+        return sequence(first: testProduct.binary, next: {
+            $0.isRoot ? nil : $0.parentDirectory
+        }).first(where: {
+            $0.basename.hasSuffix(".xctest")
+        })!
     }
 
     override class func defineArguments(parser: ArgumentParser, binder: ArgumentBinder<TestToolOptions>) {
 
         binder.bind(
-            option: parser.add(option: "--configuration", shortName: "-c", kind: Build.Configuration.self,
-                usage: "Build with configuration (debug|release) [default: debug]"),
-            to: { $0.config = $1 })
-
-        binder.bind(
             option: parser.add(option: "--skip-build", kind: Bool.self,
                 usage: "Skip building the test target"),
-            to: { $0.buildTests = !$1 })
+            to: { $0.shouldBuildTests = !$1 })
 
         binder.bind(
             option: parser.add(option: "--list-tests", shortName: "-l", kind: Bool.self,
                 usage: "Lists test methods in specifier format"),
-            to: { $0.listTests = $1 })
+            to: { $0.shouldListTests = $1 })
 
         binder.bind(
             option: parser.add(option: "--parallel", kind: Bool.self,
                 usage: "Run the tests in parallel."),
-            to: { $0.parallel = $1 })
+            to: { $0.shouldRunInParallel = $1 })
 
         binder.bind(
-            option: parser.add(option: "--specifier", shortName: "-s", kind: String.self,
-                usage: "Run a specific test class or method, Format: <test-module>.<test-case> or <test-module>.<test-case>/<test>"),
-            to: { $0.specifier = $1 })
+            option: parser.add(option: "--specifier", shortName: "-s", kind: String.self),
+            to: { $0.testCaseSpecifier = .specific($1) })
+
+        binder.bind(
+            option: parser.add(option: "--filter", kind: String.self,
+                usage: "Run test cases matching regular expression, Format: <test-target>.<test-case> or " +
+                    "<test-target>.<test-case>/<test>"),
+            to: { $0.testCaseSpecifier = .regex($1) })
     }
 
     /// Locates XCTestHelper tool inside the libexec directory and bin directory.
@@ -181,7 +246,8 @@ public class SwiftTestTool: SwiftTool<TestToolOptions> {
     /// - Returns: Path to XCTestHelper tool.
     private static func xctestHelperPath() -> AbsolutePath {
         let xctestHelperBin = "swiftpm-xctest-helper"
-        let binDirectory = AbsolutePath(CommandLine.arguments.first!, relativeTo: currentWorkingDirectory).parentDirectory
+        let binDirectory = AbsolutePath(CommandLine.arguments.first!,
+            relativeTo: currentWorkingDirectory).parentDirectory
         // XCTestHelper tool is installed in libexec.
         let maybePath = binDirectory.parentDirectory.appending(components: "libexec", "swift", "pm", xctestHelperBin)
         if isFile(maybePath) {
@@ -191,9 +257,9 @@ public class SwiftTestTool: SwiftTool<TestToolOptions> {
         // FIXME: Factor all of the development-time resource location stuff into a common place.
         let path = binDirectory.appending(component: xctestHelperBin)
         if isFile(path) {
-            return path 
+            return path
         }
-        fatalError("XCTestHelper binary not found.") 
+        fatalError("XCTestHelper binary not found.")
     }
 
     /// Runs the corresponding tool to get tests JSON and create TestSuite array.
@@ -206,13 +272,17 @@ public class SwiftTestTool: SwiftTool<TestToolOptions> {
     /// - Throws: TestError, SystemError, Utility.Errror
     ///
     /// - Returns: Array of TestSuite
-    fileprivate static func getTestSuites(path: AbsolutePath) throws -> [TestSuite] {
+    fileprivate func getTestSuites(path: AbsolutePath) throws -> [TestSuite] {
         // Run the correct tool.
       #if os(macOS)
         let tempFile = try TemporaryFile()
         let args = [SwiftTestTool.xctestHelperPath().asString, path.asString, tempFile.path.asString]
         var env = ProcessInfo.processInfo.environment
-        env["DYLD_FRAMEWORK_PATH"] = try platformFrameworksPath().asString
+        // Add the sdk platform path if we have it. If this is not present, we
+        // might always end up failing.
+        if let sdkPlatformFrameworksPath = Destination.sdkPlatformFrameworkPath() {
+            env["DYLD_FRAMEWORK_PATH"] = sdkPlatformFrameworksPath.asString
+        }
         try Process.checkNonZeroExit(arguments: args, environment: env)
         // Read the temporary file's content.
         let data = try fopen(tempFile.path).readFileContents()
@@ -222,6 +292,20 @@ public class SwiftTestTool: SwiftTool<TestToolOptions> {
       #endif
         // Parse json and return TestSuites.
         return try TestSuite.parse(jsonString: data)
+    }
+}
+
+/// A structure representing an individual unit test.
+struct UnitTest {
+    /// The name of the unit test.
+    let name: String
+
+    /// The name of the test case.
+    let testCase: String
+
+    /// The specifier argument which can be passed to XCTest.
+    var specifier: String {
+        return testCase + "/" + name
     }
 }
 
@@ -253,7 +337,7 @@ final class TestRunner {
     private func args() -> [String] {
         var args: [String] = []
       #if os(macOS)
-        args = ["xcrun", "xctest"]
+        args = ["xcrun", "--sdk", "macosx", "xctest"]
         if let xctestArg = xctestArg {
             args += ["-XCTest", xctestArg]
         }
@@ -273,14 +357,20 @@ final class TestRunner {
     ///            and second argument containing the output of the execution.
     func test() -> (Bool, String) {
         var output = ""
-        var success = true
+        var success = false
         do {
-            let result = try Process.popen(arguments: args())
-            output = try result.utf8Output().chuzzle() ?? ""
-            success = result.exitStatus == .terminated(code: 0)
-        } catch {
-            success = false
-        }
+            let process = Process(arguments: args(), redirectOutput: true, verbose: false)
+            try process.launch()
+            let result = try process.waitUntilExit()
+            output = try (result.utf8Output() + result.utf8stderrOutput()).chuzzle() ?? ""
+            switch result.exitStatus {
+            case .terminated(code: 0):
+                success = true
+            case .signalled(let signal):
+                output += "\n" + exitSignalText(code: signal)
+            default: break
+            }
+        } catch {}
         return (success, output)
     }
 
@@ -291,29 +381,24 @@ final class TestRunner {
             try processSet.add(process)
             try process.launch()
             let result = try process.waitUntilExit()
-            return result.exitStatus == .terminated(code: 0)
-        } catch {
-            return false
-        }
+            switch result.exitStatus {
+            case .terminated(code: 0):
+                return true
+            case .signalled(let signal):
+                print(exitSignalText(code: signal))
+            default: break
+            }
+        } catch {}
+        return false
+    }
+
+    private func exitSignalText(code: Int32) -> String {
+        return "Exited with signal code \(code)"
     }
 }
 
 /// A class to run tests in parallel.
 final class ParallelTestRunner {
-    /// A structure representing an individual unit test.
-    struct UnitTest {
-        /// The name of the unit test.
-        let name: String
-
-        /// The name of the test case.
-        let testCase: String
-
-        /// The specifier argument which can be passed to XCTest.
-        var specifier: String {
-            return testCase + "/" + name
-        }
-    }
-
     /// An enum representing result of a unit test execution.
     enum TestResult {
         case success(UnitTest)
@@ -345,7 +430,7 @@ final class ParallelTestRunner {
     private var numCurrentTest = 0
 
     /// True if all tests executed successfully.
-    private(set) var success: Bool = true
+    private(set) var ranSuccessfully = true
 
     let processSet: ProcessSet
 
@@ -361,19 +446,13 @@ final class ParallelTestRunner {
         progressBar.update(percent: 100*numCurrentTest/numTests, text: test.specifier)
     }
 
-    func enqueueTests() throws {
-        // Find all the test suites present in the test binary.
-        let testSuites = try SwiftTestTool.getTestSuites(path: testPath)
+    private func enqueueTests(_ tests: [UnitTest]) throws {
         // FIXME: Add a count property in SynchronizedQueue.
         var numTests = 0
         // Enqueue all the tests.
-        for testSuite in testSuites {
-            for testCase in testSuite.tests {
-                for test in testCase.tests {
-                    numTests += 1
-                    pendingTests.enqueue(UnitTest(name: test, testCase: testCase.name))
-                }
-            }
+        for test in tests {
+            numTests += 1
+            pendingTests.enqueue(test)
         }
         self.numTests = numTests
         self.numCurrentTest = 0
@@ -384,12 +463,13 @@ final class ParallelTestRunner {
     }
 
     /// Executes the tests spawning parallel workers. Blocks calling thread until all workers are finished.
-    func run() throws {
+    func run(_ tests: [UnitTest]) throws {
+        assert(!tests.isEmpty, "There should be at least one test to execute.")
         // Enqueue all the tests.
-        try enqueueTests()
+        try enqueueTests(tests)
 
         // Create the worker threads.
-        let workers: [Thread] = (0..<numJobs).map { _ in
+        let workers: [Thread] = (0..<numJobs).map({ _ in
             let thread = Thread {
                 // Dequeue a specifier and run it till we encounter nil.
                 while let test = self.pendingTests.dequeue() {
@@ -399,14 +479,14 @@ final class ParallelTestRunner {
                     if success {
                         self.finishedTests.enqueue(.success(test))
                     } else {
-                        self.success = false
+                        self.ranSuccessfully = false
                         self.finishedTests.enqueue(.failure(test, output: output))
                     }
                 }
             }
             thread.start()
             return thread
-        }
+        })
 
         // Holds the output of test cases which failed.
         var failureOutput = [String]()
@@ -435,6 +515,9 @@ final class ParallelTestRunner {
         stdoutStream <<< "\n"
         for error in failureOutput {
             stdoutStream <<< error
+        }
+        if !failureOutput.isEmpty {
+            stdoutStream <<< "\n"
         }
         stdoutStream.flush()
     }
@@ -485,29 +568,55 @@ struct TestSuite {
             throw TestError.invalidListTestJSONData
         }
 
-        return try testSuites.map { testSuite in
+        return try testSuites.map({ testSuite in
             guard case let .dictionary(testSuiteData) = testSuite,
                   case let .string(name)? = testSuiteData["name"],
                   case let .array(allTestsData)? = testSuiteData["tests"] else {
                 throw TestError.invalidListTestJSONData
             }
 
-            let testCases: [TestSuite.TestCase] = try allTestsData.map { testCase in
+            let testCases: [TestSuite.TestCase] = try allTestsData.map({ testCase in
                 guard case let .dictionary(testCaseData) = testCase,
                       case let .string(name)? = testCaseData["name"],
                       case let .array(tests)? = testCaseData["tests"] else {
                     throw TestError.invalidListTestJSONData
                 }
-                let testMethods: [String] = try tests.map { test in
+                let testMethods: [String] = try tests.map({ test in
                     guard case let .dictionary(testData) = test,
                           case let .string(testMethod)? = testData["name"] else {
                         throw TestError.invalidListTestJSONData
                     }
                     return testMethod
-                }
+                })
                 return TestSuite.TestCase(name: name, tests: testMethods)
-            }
+            })
+            
             return TestSuite(name: name, tests: testCases)
+        })
+    }
+}
+
+
+fileprivate extension Sequence where Iterator.Element == TestSuite {
+    /// Returns all the unit tests of the test suites.
+    var allTests: [UnitTest] {
+        return flatMap { $0.tests }.flatMap({ testCase in
+            testCase.tests.map{ UnitTest(name: $0, testCase: testCase.name) }
+        })
+    }
+
+    /// Return tests matching the provided specifier
+    func filteredTests(specifier: TestCaseSpecifier) -> [UnitTest] {
+        switch specifier {
+        case .none:
+            return allTests
+        case .regex(let pattern):
+            return allTests.filter({ test in
+                test.specifier.range(of: pattern,
+                                     options: .regularExpression) != nil
+            })
+        case .specific(let name):
+            return allTests.filter{ $0.specifier == name }
         }
     }
 }

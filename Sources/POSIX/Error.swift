@@ -12,6 +12,7 @@ public enum SystemError: Swift.Error {
     case chdir(Int32, String)
     case close(Int32)
     case dirfd(Int32, String)
+    case exec(Int32, path: String, args: [String])
     case fgetc(Int32)
     case fread(Int32)
     case getcwd(Int32)
@@ -39,7 +40,6 @@ import func libc.strerror_r
 import var libc.EINVAL
 import var libc.ERANGE
 
-
 extension SystemError: CustomStringConvertible {
     public var description: String {
         func strerror(_ errno: Int32) -> String {
@@ -61,7 +61,7 @@ extension SystemError: CustomStringConvertible {
             }
             fatalError("strerror_r error: \(ERANGE)")
         }
-        
+
         switch self {
         case .chdir(let errno, let path):
             return "chdir error: \(strerror(errno)): \(path)"
@@ -69,6 +69,9 @@ extension SystemError: CustomStringConvertible {
             return "close error: \(strerror(errno))"
         case .dirfd(let errno, _):
             return "dirfd error: \(strerror(errno))"
+        case .exec(let errno, let path, let args):
+            let joinedArgs = args.joined(separator: " ")
+            return "exec error: \(strerror(errno)): \(path) \(joinedArgs)"
         case .fgetc(let errno):
             return "fgetc error: \(strerror(errno))"
         case .fread(let errno):
@@ -111,29 +114,6 @@ extension SystemError: CustomStringConvertible {
             return "waitpid error: \(strerror(errno))"
         case .usleep(let errno):
             return "usleep error: \(strerror(errno))"
-        }
-    }
-}
-
-
-public enum Error: Swift.Error {
-    case exitStatus(Int32, [String])
-    case exitSignal
-}
-
-public enum ShellError: Swift.Error {
-    case system(arguments: [String], SystemError)
-    case popen(arguments: [String], SystemError)
-}
-
-extension Error: CustomStringConvertible {
-    public var description: String {
-        switch self {
-        case .exitStatus(let code, let args):
-            return "exit(\(code)): \(prettyArguments(args))"
-
-        case .exitSignal:
-            return "Child process exited with signal"
         }
     }
 }

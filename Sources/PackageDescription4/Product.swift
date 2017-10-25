@@ -8,73 +8,87 @@
  See http://swift.org/CONTRIBUTORS.txt for Swift project authors
 */
 
-public struct Product {
+/// Defines a product in the package.
+public class Product {
+
+    /// The name of the product.
     public let name: String
-    public let type: ProductType
-    public let modules: [String]
 
-    public init(name: String, type: ProductType, modules: String...) {
-        self.init(name: name, type: type, modules: modules)
-    }
-
-    public init(name: String, type: ProductType, modules: [String]) {
+    init(name: String) {
         self.name = name
-        self.type = type
-        self.modules = modules
     }
-}
 
-public enum LibraryType {
-    case Static
-    case Dynamic
-}
-
-public enum ProductType {
-    case Test
-    case Executable
-    case Library(LibraryType)
-}
-
-extension ProductType: CustomStringConvertible {
-    public var description: String {
-        switch self {
-        case .Test:
-            return "test"
-        case .Executable:
-            return "exe"
-        case .Library(.Static):
-            return "a"
-        case .Library(.Dynamic):
-            return "dylib"
-        }
-    }
-}
-
-extension Product {
     func toJSON() -> JSON {
-        var dict: [String: JSON] = [:]
-        dict["name"] = .string(name)
-        dict["type"] = .string(type.description)
-        dict["modules"] = .array(modules.map(JSON.string))
-        return .dictionary(dict)
+        fatalError("Should be implemented by subclasses")
     }
-}
 
-extension ProductType: Equatable {
-    public static func ==(lhs: ProductType, rhs: ProductType) -> Bool {
-        switch (lhs, rhs) {
-        case (.Executable, .Executable):
-            return true
-        case (.Executable, _):
-            return false
-        case (.Test, .Test):
-            return true
-        case (.Test, _):
-            return false
-        case (.Library(let lhsType), .Library(let rhsType)):
-            return lhsType == rhsType
-        case (.Library, _):
-            return false
+    /// Represents an executable product.
+    public final class Executable: Product {
+
+        /// The names of the targets in this product.
+        public let targets: [String]
+
+        init(name: String, targets: [String]) {
+            self.targets = targets
+            super.init(name: name)
         }
+
+        override func toJSON() -> JSON {
+            return .dictionary([
+                "name": .string(name),
+                "product_type": .string("executable"),
+                "targets": .array(targets.map(JSON.string)),
+            ])
+        }
+    }
+
+    /// Represents a library product.
+    public final class Library: Product {
+
+        /// The type of library product.
+        public enum LibraryType: String {
+            case `static`
+            case `dynamic`
+        }
+
+        /// The names of the targets in this product.
+        public let targets: [String]
+
+        /// The type of the library.
+        ///
+        /// If the type is unspecified, package manager will automatically choose a type.
+        public let type: LibraryType?
+
+        init(name: String, type: LibraryType? = nil, targets: [String]) {
+            self.type = type
+            self.targets = targets
+            super.init(name: name)
+        }
+
+        override func toJSON() -> JSON {
+            return .dictionary([
+                "name": .string(name),
+                "product_type": .string("library"),
+                "type": type.map({ JSON.string($0.rawValue) }) ?? .null,
+                "targets": .array(targets.map(JSON.string)),
+            ])
+        }
+    }
+
+    /// Create a libary product.
+    public static func library(
+        name: String,
+        type: Library.LibraryType? = nil,
+        targets: [String]
+    ) -> Product {
+        return Library(name: name, type: type, targets: targets)
+    }
+
+    /// Create an executable product.
+    public static func executable(
+        name: String,
+        targets: [String]
+    ) -> Product {
+        return Executable(name: name, targets: targets)
     }
 }

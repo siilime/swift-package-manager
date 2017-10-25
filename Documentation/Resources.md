@@ -4,25 +4,12 @@
 
 * [Overview](README.md)
 * [Usage](Usage.md)
-* [Reference](Reference.md)
+* [PackageDescription API Version 3](PackageDescriptionV3.md)
+* [PackageDescription API Version 4](PackageDescriptionV4.md)
 * [**Resources**](Resources.md)
-  * [Known Issues](#known-issues)
-  * [Future Plans](#future-plans)
   * [Support](#support)
   * [Reporting a good SwiftPM Bug](#reporting-a-good-swiftpm-bug)
   * [Community Proposal](#community-proposal)
-
----
-
-## Known Issues
-
-*Content to come.*
-
----
-
-## Future Plans
-
-*Content to come.*
 
 ---
 
@@ -44,9 +31,10 @@ Fill the following fields:
 * `Attachment`: Attach relevant files like logs, project
 
 Please include a minimal example package which can reproduce the issue. The sample package can be attached with the report or you can include URL of the package hosted on places like GitHub.  
-Also, include the verbose build log. If you're using `swift build` to compile the project you can obtain the verbose log using:
+Also, include the verbose logs by adding `--verbose` or `-v` after a subcommand. For e.g.:
 
-    $ swift build -v
+    $ swift build --verbose
+    $ swift package -v update
 
 If the bug is with a generated Xcode project, include how the project was generated and the Xcode build log.
 
@@ -55,7 +43,3 @@ If the bug is with a generated Xcode project, include how the project was genera
 ## Project History
 
 To learn the original intentions for Swift Package Manager, read the [Community Proposal](PackageManagerCommunityProposal.md).
-
-
-
-

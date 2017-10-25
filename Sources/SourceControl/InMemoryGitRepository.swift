@@ -20,11 +20,11 @@ public enum InMemoryGitRepositoryError: Swift.Error {
     case tagAlreadyPresent
 }
 
-/// A class that implements basic git features on in-memory file system. It takes the path and file system reference where
-/// the repository should be created. The class itself is a file system pointing to current revision state i.e. HEAD. All mutations
-/// should be made on file system interface of this class and then they can be committed using commit() method. 
-/// Calls to checkout related methods will checkout the HEAD on the passed file system at the repository path, as well as on the file system
-/// interface of this class.
+/// A class that implements basic git features on in-memory file system. It takes the path and file system reference
+/// where the repository should be created. The class itself is a file system pointing to current revision state
+/// i.e. HEAD. All mutations should be made on file system interface of this class and then they can be committed using
+/// commit() method. Calls to checkout related methods will checkout the HEAD on the passed file system at the
+/// repository path, as well as on the file system interface of this class.
 /// Note: This class is intended to be used as testing infrastructure only.
 /// Note: This class is not thread safe yet.
 public final class InMemoryGitRepository {
@@ -56,15 +56,20 @@ public final class InMemoryGitRepository {
     fileprivate var tagsMap: [String: RevisionIdentifier] = [:]
 
     /// The array of current tags in the repository.
-    public var tags: [String] { 
+    public var tags: [String] {
         return Array(tagsMap.keys)
+    }
+
+    /// The list of revisions in the repository.
+    public var revisions: [RevisionIdentifier] {
+        return Array(history.keys)
     }
 
     /// Indicates whether there are any uncommited changes in the repository.
     fileprivate var isDirty = false
 
     /// The path at which this repository is located.
-    private let path: AbsolutePath
+    fileprivate let path: AbsolutePath
 
     /// The file system in which this repository should be installed.
     private let fs: InMemoryFileSystem
@@ -78,7 +83,9 @@ public final class InMemoryGitRepository {
     }
 
     /// Copy/clone this repository.
-    fileprivate func copy() -> InMemoryGitRepository {
+    fileprivate func copy(at newPath: AbsolutePath? = nil) -> InMemoryGitRepository {
+        let path = newPath ?? self.path
+        try! fs.createDirectory(path, recursive: true)
         let repo = InMemoryGitRepository(path: path, fs: fs)
         for (revision, state) in history {
             repo.history[revision] = state.copy()
@@ -92,7 +99,7 @@ public final class InMemoryGitRepository {
     @discardableResult
     public func commit() -> String {
         // Create a fake hash for thie commit.
-        let hash = NSUUID().uuidString
+        let hash = String((NSUUID().uuidString + NSUUID().uuidString).prefix(40))
         head.hash = hash
         // Store the commit in history.
         history[hash] = head.copy()
@@ -109,7 +116,7 @@ public final class InMemoryGitRepository {
             throw InMemoryGitRepositoryError.unknownRevision
         }
         // Point the head to the revision state.
-        head = state 
+        head = state
         isDirty = false
         // Install this state on the passed filesystem.
         try installHead()
@@ -129,16 +136,17 @@ public final class InMemoryGitRepository {
     }
 
     /// Installs (or checks out) current head on the filesystem on which this repository exists.
-    private func installHead() throws {
+    fileprivate func installHead() throws {
         // Remove the old state.
-        fs.removeFileTree(path)
+        try fs.removeFileTree(path)
         // Create the repository directory.
         try fs.createDirectory(path, recursive: true)
         // Get the file system state at the HEAD,
         let headFs = head.fileSystem
 
         /// Recursively copies the content at HEAD to fs.
-        func install(at path: AbsolutePath) throws { 
+        func install(at path: AbsolutePath) throws {
+            guard headFs.isDirectory(path) else { return }
             for entry in try headFs.getDirectoryContents(path) {
                 // The full path of the entry.
                 let entryPath = path.appending(component: entry)
@@ -178,11 +186,11 @@ extension InMemoryGitRepository: FileSystem {
     public func exists(_ path: AbsolutePath) -> Bool {
         return head.fileSystem.exists(path)
     }
-    
+
     public func isDirectory(_ path: AbsolutePath) -> Bool {
         return head.fileSystem.isDirectory(path)
     }
-    
+
     public func isFile(_ path: AbsolutePath) -> Bool {
         return head.fileSystem.isFile(path)
     }
@@ -191,10 +199,14 @@ extension InMemoryGitRepository: FileSystem {
         return head.fileSystem.isSymlink(path)
     }
 
+    public func isExecutableFile(_ path: AbsolutePath) -> Bool {
+        return head.fileSystem.isExecutableFile(path)
+    }
+
     public func getDirectoryContents(_ path: AbsolutePath) throws -> [String] {
         return try head.fileSystem.getDirectoryContents(path)
     }
-    
+
     public func createDirectory(_ path: AbsolutePath, recursive: Bool) throws {
         try head.fileSystem.createDirectory(path, recursive: recursive)
     }
@@ -208,8 +220,12 @@ extension InMemoryGitRepository: FileSystem {
         isDirty = true
     }
 
-    public func removeFileTree(_ path: AbsolutePath) {
-        head.fileSystem.removeFileTree(path)
+    public func removeFileTree(_ path: AbsolutePath) throws {
+        try head.fileSystem.removeFileTree(path)
+    }
+
+    public func chmod(_ mode: FileMode, path: AbsolutePath, options: Set<FileMode.Option>) throws {
+        try head.fileSystem.chmod(mode, path: path, options: options)
     }
 }
 
@@ -218,12 +234,17 @@ extension InMemoryGitRepository: Repository {
         return Revision(identifier: tagsMap[tag]!)
     }
 
+    public func resolveRevision(identifier: String) throws -> Revision {
+        return Revision(identifier: tagsMap[identifier] ?? identifier)
+    }
+
     public func exists(revision: Revision) -> Bool {
         return history[revision.identifier] != nil
     }
 
     public func openFileView(revision: Revision) throws -> FileSystem {
-        return history[revision.identifier]!.fileSystem
+        var fs: FileSystem = history[revision.identifier]!.fileSystem
+        return RerootedFileSystemView(&fs, rootedAt: path)
     }
 }
 
@@ -237,11 +258,11 @@ extension InMemoryGitRepository: WorkingCheckout {
     }
 
     public func hasUnpushedCommits() throws -> Bool {
-        fatalError("Unimplemented")
+        return false
     }
 
     public func checkout(newBranch: String) throws {
-        fatalError("Unimplemented")
+        history[newBranch] = head
     }
 }
 
@@ -255,7 +276,7 @@ public final class InMemoryGitRepositoryProvider: RepositoryProvider {
 
     /// Contains the repositories which are checked out using this provider.
     private var checkoutsMap = [AbsolutePath: InMemoryGitRepository]()
-    
+
     /// Create a new provider.
     public init() {
     }
@@ -271,8 +292,8 @@ public final class InMemoryGitRepositoryProvider: RepositoryProvider {
     public func openRepo(at path: AbsolutePath) -> InMemoryGitRepository {
         return fetchedMap[path] ?? checkoutsMap[path]!
     }
-    
-    // MARK:- RepositoryProvider conformance
+
+    // MARK: - RepositoryProvider conformance
     // Note: These methods use force unwrap (instead of throwing) to honor their preconditions.
 
     public func fetch(repository: RepositorySpecifier, to path: AbsolutePath) throws {
@@ -289,7 +310,9 @@ public final class InMemoryGitRepositoryProvider: RepositoryProvider {
         to destinationPath: AbsolutePath,
         editable: Bool
     ) throws {
-        checkoutsMap[destinationPath] = fetchedMap[sourcePath]!.copy()
+        let checkout = fetchedMap[sourcePath]!.copy(at: destinationPath)
+        checkoutsMap[destinationPath] = checkout
+        try checkout.installHead()
     }
 
     public func openCheckout(at path: AbsolutePath) throws -> WorkingCheckout {

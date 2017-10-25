@@ -32,11 +32,13 @@ func describe(_ package: Package, in mode: DescribeMode, on stream: OutputByteSt
 extension Package: JSONSerializable {
 
     func describe(on stream: OutputByteStream) {
-        stream <<< "Name: " <<< name <<< "\n"
-        stream <<< "Path: " <<< path.asString <<< "\n"
-        stream <<< "Modules: " <<< "\n"
-        for module in modules {
-            module.describe(on: stream, indent: 4)
+        stream <<< """
+            Name: \(name)
+            Path: \(path.asString)
+            Modules:\n
+            """
+        for target in targets {
+            target.describe(on: stream, indent: 4)
             stream <<< "\n"
         }
     }
@@ -45,20 +47,26 @@ extension Package: JSONSerializable {
         return .dictionary([
             "name": .string(name),
             "path": .string(path.asString),
-            "modules": .array(modules.map{ $0.toJSON() }),
+            "targets": .array(targets.map({ $0.toJSON() })),
         ])
     }
 }
 
-extension Module: JSONSerializable {
+extension Target: JSONSerializable {
 
     func describe(on stream: OutputByteStream, indent: Int = 0) {
-        stream <<< Format.asRepeating(string: " ", count: indent) <<< "Name: " <<< name <<< "\n"
-        stream <<< Format.asRepeating(string: " ", count: indent) <<< "C99name: " <<< c99name <<< "\n"
-        stream <<< Format.asRepeating(string: " ", count: indent) <<< "Type: " <<< type.rawValue <<< "\n"
-        stream <<< Format.asRepeating(string: " ", count: indent) <<< "Module type: " <<< String(describing: type(of: self)) <<< "\n"
-        stream <<< Format.asRepeating(string: " ", count: indent) <<< "Path: " <<< sources.root.asString <<< "\n"
-        stream <<< Format.asRepeating(string: " ", count: indent) <<< "Sources: " <<< sources.relativePaths.map{$0.asString}.joined(separator: ", ") <<< "\n"
+        stream <<< Format.asRepeating(string: " ", count: indent)
+            <<< "Name: " <<< name <<< "\n"
+        stream <<< Format.asRepeating(string: " ", count: indent)
+            <<< "C99name: " <<< c99name <<< "\n"
+        stream <<< Format.asRepeating(string: " ", count: indent)
+            <<< "Type: " <<< type.rawValue <<< "\n"
+        stream <<< Format.asRepeating(string: " ", count: indent)
+            <<< "Module type: " <<< String(describing: Swift.type(of: self)) <<< "\n"
+        stream <<< Format.asRepeating(string: " ", count: indent)
+            <<< "Path: " <<< sources.root.asString <<< "\n"
+        stream <<< Format.asRepeating(string: " ", count: indent)
+            <<< "Sources: " <<< sources.relativePaths.map({ $0.asString }).joined(separator: ", ") <<< "\n"
     }
 
     public func toJSON() -> JSON {
@@ -66,7 +74,7 @@ extension Module: JSONSerializable {
             "name": .string(name),
             "c99name": .string(c99name),
             "type": type.toJSON(),
-            "module_type": .string(String(describing: type(of: self))),
+            "module_type": .string(String(describing: Swift.type(of: self))),
             "path": .string(sources.root.asString),
             "sources": sources.toJSON(),
         ])
@@ -75,11 +83,11 @@ extension Module: JSONSerializable {
 
 extension Sources: JSONSerializable {
     public func toJSON() -> JSON {
-        return .array(relativePaths.map{.string($0.asString)})
+        return .array(relativePaths.map({ .string($0.asString) }))
     }
 }
 
-extension ModuleType: JSONSerializable {
+extension Target.Kind: JSONSerializable {
     public func toJSON() -> JSON {
         return .string(rawValue)
     }

@@ -8,12 +8,18 @@
  See http://swift.org/CONTRIBUTORS.txt for Swift project authors
 */
 
+import Basic
 import Utility
 import SourceControl
 
 /// Extensions useful for unit testing purposes.
 /// Note: These are not thread safe.
 public extension GitRepository {
+
+    /// Create the repository using git init.
+    func create() throws {
+        try systemQuietly([Git.tool, "-C", path.asString, "init"])
+    }
 
     /// Returns current branch name. If HEAD is on a detached state, this returns HEAD.
     func currentBranch() throws -> String {

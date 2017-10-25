@@ -21,7 +21,7 @@ import class Foundation.Bundle
 
 public enum SwiftPMProductError: Swift.Error {
     case packagePathNotFound
-    case executionFailure(error: Swift.Error, output: String)
+    case executionFailure(error: Swift.Error, output: String, stderr: String)
 }
 
 /// Defines the executables used by SwiftPM.
@@ -31,6 +31,7 @@ public enum SwiftPMProduct {
     case SwiftBuild
     case SwiftPackage
     case SwiftTest
+    case SwiftRun
     case XCTestHelper
     case TestSupportExecutable
 
@@ -42,7 +43,8 @@ public enum SwiftPMProduct {
         }
         fatalError()
       #else
-        return AbsolutePath(CommandLine.arguments.first!, relativeTo: currentWorkingDirectory).parentDirectory.appending(self.exec)
+        return AbsolutePath(CommandLine.arguments.first!, relativeTo: currentWorkingDirectory)
+            .parentDirectory.appending(self.exec)
       #endif
     }
 
@@ -55,6 +57,8 @@ public enum SwiftPMProduct {
             return RelativePath("swift-package")
         case .SwiftTest:
             return RelativePath("swift-test")
+        case .SwiftRun:
+            return RelativePath("swift-run")
         case .XCTestHelper:
             return RelativePath("swiftpm-xctest-helper")
         case .TestSupportExecutable:
@@ -67,11 +71,17 @@ public enum SwiftPMProduct {
     /// - Parameters:
     ///         - args: The arguments to pass.
     ///         - env: Additional environment variables to pass. The values here are merged with default env.
-    ///         - chdir: Adds argument `--chdir <path>` if not nil.
+    ///         - packagePath: Adds argument `--package-path <path>` if not nil.
     ///         - printIfError: Print the output on non-zero exit.
     ///
     /// - Returns: The output of the process.
-    public func execute(_ args: [String], chdir: AbsolutePath? = nil, env: [String: String]? = nil, printIfError: Bool = false) throws -> String {
+    @discardableResult
+    public func execute(
+        _ args: [String],
+        packagePath: AbsolutePath? = nil,
+        env: [String: String]? = nil,
+        printIfError: Bool = false
+    ) throws -> String {
         var environment = ProcessInfo.processInfo.environment
         for (key, value) in (env ?? [:]) {
             environment[key] = value
@@ -84,27 +94,33 @@ public enum SwiftPMProduct {
         // FIXME: We use this private environment variable hack to be able to
         // create special conditions in swift-build for swiftpm tests.
         environment["IS_SWIFTPM_TEST"] = "1"
+        environment["SDKROOT"] = nil
 
-        var out = ""
         var completeArgs = [path.asString]
-        if let chdir = chdir {
-            completeArgs += ["--chdir", chdir.asString]
+        if let packagePath = packagePath {
+            completeArgs += ["--package-path", packagePath.asString]
         }
         completeArgs += args
-        do {
-            try POSIX.popen(completeArgs, redirectStandardError: true, environment: environment) {
-                out += $0
-            }
-            return out
-        } catch {
-            if printIfError {
-                print("**** FAILURE EXECUTING SUBPROCESS ****")
-                print("command: " + completeArgs.map{ $0.shellEscaped() }.joined(separator: " "))
-                print("SWIFT_EXEC:", environment["SWIFT_EXEC"] ?? "nil")
-                print("output:", out)
-            }
-            throw SwiftPMProductError.executionFailure(error: error, output: out)
+
+        let result = try Process.popen(arguments: completeArgs, environment: environment)
+        let output = try result.utf8Output()
+        let stderr = try result.utf8stderrOutput()
+
+        if result.exitStatus == .terminated(code: 0) {
+            // FIXME: We should return stderr separately.
+            return output + stderr
         }
+        if printIfError {
+            print("**** FAILURE EXECUTING SUBPROCESS ****")
+            print("command: " + completeArgs.map({ $0.shellEscaped() }).joined(separator: " "))
+            print("SWIFT_EXEC:", environment["SWIFT_EXEC"] ?? "nil")
+            print("output:", output)
+        }
+        throw SwiftPMProductError.executionFailure(
+            error: ProcessResult.Error.nonZeroExit(result),
+            output: output,
+            stderr: stderr
+        )
     }
 
     public static func packagePath(for packageName: String, packageRoot: AbsolutePath) throws -> AbsolutePath {

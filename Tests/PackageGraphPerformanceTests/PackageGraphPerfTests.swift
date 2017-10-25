@@ -40,7 +40,7 @@ class PackageGraphPerfTests: XCTestCasePerf {
             let manifest = Manifest(
                 path: AbsolutePath(url).appending(component: Manifest.filename),
                 url: url,
-                package: package,
+                package: .v3(package),
                 version: "1.0.0"
             )
             if pkg == 1 {
@@ -51,8 +51,14 @@ class PackageGraphPerfTests: XCTestCasePerf {
         }
         
         measure {
-            let g = try! PackageGraphLoader().load(rootManifests: rootManifests, externalManifests: externalManifests, fileSystem: fs)
+            let diagnostics = DiagnosticsEngine()
+            let g = PackageGraphLoader().load(
+                root: PackageGraphRoot(input: PackageGraphRootInput(packages: rootManifests.map({$0.path})), manifests: rootManifests),
+                externalManifests: externalManifests,
+                diagnostics: diagnostics,
+                fileSystem: fs)
             XCTAssertEqual(g.packages.count, N)
+            XCTAssertFalse(diagnostics.hasErrors)
         }
     }
 }

@@ -8,6 +8,8 @@
  See http://swift.org/CONTRIBUTORS.txt for Swift project authors
 */
 
+import Basic
+
 /// Get clang's version from the given version output string on Ubuntu.
 public func getClangVersion(versionOutput: String) -> (major: Int, minor: Int)? {
     // Clang outputs version in this format on Ubuntu:
@@ -18,8 +20,9 @@ public func getClangVersion(versionOutput: String) -> (major: Int, minor: Int)? 
           clangVersionString.hasPrefix(versionStringPrefix) else {
         return nil
     }
-    let versionStartIndex = clangVersionString.index(clangVersionString.startIndex, offsetBy: versionStringPrefix.utf8.count)
-    let versionString = clangVersionString[versionStartIndex..<clangVersionString.endIndex]
+    let versionStartIndex = clangVersionString.index(clangVersionString.startIndex,
+        offsetBy: versionStringPrefix.utf8.count)
+    let versionString = clangVersionString[versionStartIndex...]
     // Split major minor patch etc.
     let versions = versionString.utf8.split(separator: UInt8(ascii: ".")).flatMap(String.init)
     guard versions.count > 1, let major = Int(versions[0]), let minor = Int(versions[1]) else {

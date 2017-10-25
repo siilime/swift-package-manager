@@ -43,66 +43,40 @@ public class Product {
 
     /// The type of product to create.
     public let type: ProductType
-    
-    /// The list of modules to combine to form the product.
-    ///
-    /// This is never empty, and is only the modules which are required to be in
-    /// the product, but not necessarily their transitive dependencies.
-    public let modules: [Module]
 
-    public init(name: String, type: ProductType, modules: [Module]) {
-        precondition(!modules.isEmpty)
+    /// The list of targets to combine to form the product.
+    ///
+    /// This is never empty, and is only the targets which are required to be in
+    /// the product, but not necessarily their transitive dependencies.
+    public let targets: [Target]
+
+    /// The path to linux main file.
+    public let linuxMain: AbsolutePath?
+
+    public init(name: String, type: ProductType, targets: [Target], linuxMain: AbsolutePath? = nil) {
+        precondition(!targets.isEmpty)
         if type == .executable {
-            assert(modules.filter{$0.type == .executable}.count == 1, "Executable products should have exactly one executable module.")
+            assert(targets.filter({ $0.type == .executable }).count == 1,
+                   "Executable products should have exactly one executable target.")
+        }
+        if linuxMain != nil {
+            assert(type == .test, "Linux main should only be set on test products")
         }
         self.name = name
         self.type = type
-        self.modules = modules
+        self.targets = targets
+        self.linuxMain = linuxMain 
     }
-
-    public var outname: RelativePath {
-        switch type {
-        case .executable:
-            return RelativePath(name)
-        case .library(.static):
-            return RelativePath("lib\(name).a")
-        case .library(.dynamic):
-            return RelativePath("lib\(name).\(Product.dynamicLibraryExtension)")
-        case .library(.automatic):
-            fatalError()
-        case .test:
-            let base = "\(name).xctest"
-            #if os(macOS)
-                return RelativePath("\(base)/Contents/MacOS/\(name)")
-            #else
-                return RelativePath(base)
-            #endif
-        }
-    }
-
-    // FIXME: This needs to be come from a toolchain object, not the host
-    // configuration.
-#if os(macOS)
-    public static let dynamicLibraryExtension = "dylib"
-#else
-    public static let dynamicLibraryExtension = "so"
-#endif
 }
 
 extension Product: CustomStringConvertible {
     public var description: String {
-        let base = outname.basename
-        switch type {
-        case .test:
-            return "\(base).xctest"
-        default:
-            return base
-        }
+        return "<Product: \(name)>"
     }
 }
 
 extension ProductType: Equatable {
-    public static func ==(lhs: ProductType, rhs: ProductType) -> Bool {
+    public static func == (lhs: ProductType, rhs: ProductType) -> Bool {
         switch (lhs, rhs) {
         case (.executable, .executable):
             return true

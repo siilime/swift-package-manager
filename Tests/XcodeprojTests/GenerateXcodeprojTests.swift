@@ -23,7 +23,9 @@ class GenerateXcodeprojTests: XCTestCase {
         mktmpdir { dstdir in
             let fileSystem = InMemoryFileSystem(emptyFiles: "/Sources/DummyModuleName/source.swift")
 
-            let graph = try loadMockPackageGraph(["/": Package(name: "Foo")], root: "/", in: fileSystem)
+            let diagnostics = DiagnosticsEngine()
+            let graph = loadMockPackageGraph(["/": Package(name: "Foo")], root: "/", diagnostics: diagnostics, in: fileSystem)
+            XCTAssertFalse(diagnostics.hasErrors)
 
             let projectName = "DummyProjectName"
             let outpath = try Xcodeproj.generate(outputDir: dstdir, projectName: projectName, graph: graph, options: XcodeprojOptions())
@@ -36,16 +38,31 @@ class GenerateXcodeprojTests: XCTestCase {
             let output = try Process.checkNonZeroExit(
                 args: "env", "-u", "TOOLCHAINS", "xcodebuild", "-list", "-project", outpath.asString).chomp()
 
-            let expectedOutput = "Information about project \"DummyProjectName\":\n    Targets:\n        DummyModuleName\n\n    Build Configurations:\n        Debug\n        Release\n\n    If no build configuration is specified and -scheme is not passed then \"Debug\" is used.\n\n    Schemes:\n        DummyProjectName\n".chomp()
+            XCTAssertEqual(output, """
+               Information about project "DummyProjectName":
+                   Targets:
+                       DummyModuleName
+                       Foo
+                       FooPackageDescription
 
-            XCTAssertEqual(output, expectedOutput)
+                   Build Configurations:
+                       Debug
+                       Release
+               
+                   If no build configuration is specified and -scheme is not passed then "Debug" is used.
+               
+                   Schemes:
+                       DummyProjectName-Package
+               """)
         }
       #endif
     }
 
     func testXcconfigOverrideValidatesPath() throws {
+        let diagnostics = DiagnosticsEngine()
         let fileSystem = InMemoryFileSystem(emptyFiles: "/Bar/bar.swift")
-        let graph = try loadMockPackageGraph(["/Bar": Package(name: "Bar")], root: "/Bar", in: fileSystem)
+        let graph = loadMockPackageGraph(["/Bar": Package(name: "Bar")], root: "/Bar", diagnostics: diagnostics, in: fileSystem)
+        XCTAssertFalse(diagnostics.hasErrors)
 
         let options = XcodeprojOptions(xcconfigOverrides: AbsolutePath("/doesntexist"))
         do {
@@ -60,10 +77,12 @@ class GenerateXcodeprojTests: XCTestCase {
     }
 
     func testGenerateXcodeprojWithInvalidModuleNames() throws {
+        let diagnostics = DiagnosticsEngine()
         let moduleName = "Modules"
         let warningStream = BufferedOutputByteStream()
         let fileSystem = InMemoryFileSystem(emptyFiles: "/Sources/\(moduleName)/example.swift")
-        let graph = try loadMockPackageGraph(["/Sources": Package(name: moduleName)], root: "/Sources", in: fileSystem)
+        let graph = loadMockPackageGraph(["/Sources": Package(name: moduleName)], root: "/Sources", diagnostics: diagnostics, in: fileSystem)
+        XCTAssertFalse(diagnostics.hasErrors)
 
         _ = try xcodeProject(xcodeprojPath: AbsolutePath.root.appending(component: "xcodeproj"),
                              graph: graph, extraDirs: [], options: XcodeprojOptions(), fileSystem: fileSystem,

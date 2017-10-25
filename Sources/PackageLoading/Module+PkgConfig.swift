@@ -9,7 +9,6 @@
 */
 
 import Basic
-import POSIX
 import PackageModel
 import Utility
 
@@ -32,7 +31,7 @@ public struct PkgConfigResult {
     public let error: Swift.Error?
 
     /// If the pc file was not found.
-    public var noPcFile: Bool {
+    public var couldNotFindConfigFile: Bool {
         switch error {
             case PkgConfigError.couldNotFindConfigFile?: return true
             default: return false
@@ -58,16 +57,19 @@ public struct PkgConfigResult {
     }
 }
 
-/// Get pkgConfig result for a CModule.
-public func pkgConfigArgs(for module: CModule, fileSystem: FileSystem = localFileSystem) -> PkgConfigResult? {
+/// Get pkgConfig result for a CTarget.
+public func pkgConfigArgs(for target: CTarget, fileSystem: FileSystem = localFileSystem) -> PkgConfigResult? {
     // If there is no pkg config name defined, we're done.
-    guard let pkgConfigName = module.pkgConfig else { return nil }
+    guard let pkgConfigName = target.pkgConfig else { return nil }
     // Compute additional search paths for the provider, if any.
-    let provider = module.providers?.first{ $0.isAvailable }
-    let additionalSearchPaths = provider?.pkgConfigSearchPath().map{[$0]} ?? []
+    let provider = target.providers?.first { $0.isAvailable }
+    let additionalSearchPaths = provider?.pkgConfigSearchPath() ?? []
     // Get the pkg config flags.
     do {
-        let pkgConfig = try PkgConfig(name: pkgConfigName, additionalSearchPaths: additionalSearchPaths, fileSystem: fileSystem)
+        let pkgConfig = try PkgConfig(
+            name: pkgConfigName,
+            additionalSearchPaths: additionalSearchPaths,
+            fileSystem: fileSystem)
         // Run the whitelist checker.
         try whitelist(pcFile: pkgConfigName, flags: (pkgConfig.cFlags, pkgConfig.libs))
         // Remove any default flags which compiler adds automatically.
@@ -81,10 +83,10 @@ public func pkgConfigArgs(for module: CModule, fileSystem: FileSystem = localFil
 extension SystemPackageProvider {
     public var installText: String {
         switch self {
-        case .Brew(let name):
-            return "    brew install \(name)\n"
-        case .Apt(let name):
-            return "    apt-get install \(name)\n"
+        case .brewItem(let packages):
+            return "    brew install \(packages.joined(separator: " "))\n"
+        case .aptItem(let packages):
+            return "    apt-get install \(packages.joined(separator: " "))\n"
         }
     }
 
@@ -92,21 +94,21 @@ extension SystemPackageProvider {
     var isAvailable: Bool {
         guard let platform = Platform.currentPlatform else { return false }
         switch self {
-        case .Brew(_):
-            if case .darwin = platform  {
+        case .brewItem:
+            if case .darwin = platform {
                 return true
             }
-        case .Apt(_):
-            if case .linux(.debian) = platform  {
+        case .aptItem:
+            if case .linux(.debian) = platform {
                 return true
             }
         }
         return false
     }
 
-    func pkgConfigSearchPath() -> AbsolutePath? {
+    func pkgConfigSearchPath() -> [AbsolutePath] {
         switch self {
-        case .Brew(let name):
+        case .brewItem(let packages):
             // Homebrew can have multiple versions of the same package. The
             // user can choose another version than the latest by running
             // ``brew switch NAME VERSION``, so we shouldn't assume to link
@@ -115,18 +117,16 @@ extension SystemPackageProvider {
             struct Static {
                 static let value = { try? Process.checkNonZeroExit(args: "brew", "--prefix").chomp() }()
             }
-            guard let brewPrefix = Static.value else {
-                return nil
-            }
-            return AbsolutePath(brewPrefix).appending(components: "opt", name, "lib", "pkgconfig")
-        case .Apt:
-            return nil
+            guard let brewPrefix = Static.value else { return [] }
+            return packages.map({ AbsolutePath(brewPrefix).appending(components: "opt", $0, "lib", "pkgconfig") })
+        case .aptItem:
+            return []
         }
     }
 
     // FIXME: Get rid of this method once we move on to new Build code.
     static func providerForCurrentPlatform(providers: [SystemPackageProvider]) -> SystemPackageProvider? {
-        return providers.filter{ $0.isAvailable }.first
+        return providers.first(where: { $0.isAvailable })
     }
 }
 
@@ -137,7 +137,7 @@ extension SystemPackageProvider {
 func whitelist(pcFile: String, flags: (cFlags: [String], libs: [String])) throws {
     // Returns an array of flags which doesn't match any filter.
     func filter(flags: [String], filters: [String]) -> [String] {
-        var filtered = [String]()     
+        var filtered = [String]()
         var it = flags.makeIterator()
         while let flag = it.next() {
             guard let filter = filters.filter({ flag.hasPrefix($0) }).first else {
@@ -146,14 +146,15 @@ func whitelist(pcFile: String, flags: (cFlags: [String], libs: [String])) throws
             }
             // If the flag and its value are separated, skip next flag.
             if flag == filter {
-                guard let _ = it.next() else {
-                   fatalError("Expected associated value") 
+                guard it.next() != nil else {
+                   fatalError("Expected associated value")
                 }
             }
         }
         return filtered
     }
-    let filtered = filter(flags: flags.cFlags, filters: ["-I", "-F"]) + filter(flags: flags.libs, filters: ["-L", "-l", "-F", "-framework"])
+    let filtered = filter(flags: flags.cFlags, filters: ["-I", "-F"]) +
+        filter(flags: flags.libs, filters: ["-L", "-l", "-F", "-framework"])
     guard filtered.isEmpty else {
         throw PkgConfigError.nonWhitelistedFlags("Non whitelisted flags found: \(filtered) in pc file \(pcFile)")
     }

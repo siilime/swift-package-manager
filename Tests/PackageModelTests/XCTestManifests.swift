@@ -14,7 +14,7 @@ import XCTest
 public func allTests() -> [XCTestCaseEntry] {
     return [
         testCase(ModuleDependencyTests.allTests),
+        testCase(ToolsVersionTests.allTests),
     ]
 }
 #endif
-

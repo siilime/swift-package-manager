@@ -13,7 +13,6 @@ import XCTest
 import Basic
 import SourceControl
 import Utility
-import enum POSIX.Error
 
 import TestSupport
 
@@ -59,6 +58,21 @@ class GitRepositoryTests: XCTestCase {
                     args: Git.tool, "-C", testRepoPath.asString, "rev-parse", "--verify", "1.2.3").utf8Output().chomp())
             if let revision = try? repository.resolveRevision(tag: "<invalid>") {
                 XCTFail("unexpected resolution of invalid tag to \(revision)")
+            }
+
+            let master = try repository.resolveRevision(identifier: "master")
+
+            XCTAssertEqual(master.identifier,
+                try Process.checkNonZeroExit(
+                    args: Git.tool, "-C", testRepoPath.asString, "rev-parse", "--verify", "master").chomp())
+
+            // Check that git hashes resolve to themselves.
+            let masterIdentifier = try repository.resolveRevision(identifier: master.identifier)
+            XCTAssertEqual(master.identifier, masterIdentifier.identifier)
+
+            // Check that invalid identifier doesn't resolve.
+            if let revision = try? repository.resolveRevision(identifier: "invalid") {
+                XCTFail("unexpected resolution of invalid identifier to \(revision)")
             }
         }
     }
@@ -155,14 +169,21 @@ class GitRepositoryTests: XCTestCase {
             try makeDirectories(testRepoPath)
             initGitRepo(testRepoPath)
 
-            // Add a couple files and a directory.
+            // Add a few files and a directory.
             let test1FileContents: ByteString = "Hello, world!"
             let test2FileContents: ByteString = "Hello, happy world!"
+            let test3FileContents: ByteString = """
+                #!/bin/sh
+                set -e
+                exit 0
+                """
             try localFileSystem.writeFileContents(testRepoPath.appending(component: "test-file-1.txt"), bytes: test1FileContents)
             try localFileSystem.createDirectory(testRepoPath.appending(component: "subdir"))
             try localFileSystem.writeFileContents(testRepoPath.appending(components: "subdir", "test-file-2.txt"), bytes: test2FileContents)
+            try localFileSystem.writeFileContents(testRepoPath.appending(component: "test-file-3.sh"), bytes: test3FileContents)
+            try! Process.checkNonZeroExit(args: "chmod", "+x", testRepoPath.appending(component: "test-file-3.sh").asString)
             let testRepo = GitRepository(path: testRepoPath)
-            try testRepo.stage(files: "test-file-1.txt", "subdir/test-file-2.txt")
+            try testRepo.stage(files: "test-file-1.txt", "subdir/test-file-2.txt", "test-file-3.sh")
             try testRepo.commit()
             try testRepo.tag(name: "test-tag")
 
@@ -184,9 +205,11 @@ class GitRepositoryTests: XCTestCase {
             XCTAssert(!view.exists(AbsolutePath("/does-not-exist")))
             XCTAssert(view.isFile(AbsolutePath("/test-file-1.txt")))
             XCTAssert(!view.isSymlink(AbsolutePath("/test-file-1.txt")))
+            XCTAssert(!view.isExecutableFile(AbsolutePath("/does-not-exist")))
+            XCTAssert(view.isExecutableFile(AbsolutePath("/test-file-3.sh")))
 
             // Check read of a directory.
-            XCTAssertEqual(try view.getDirectoryContents(AbsolutePath("/")).sorted(), ["file.swift", "subdir", "test-file-1.txt"])
+            XCTAssertEqual(try view.getDirectoryContents(AbsolutePath("/")).sorted(), ["file.swift", "subdir", "test-file-1.txt", "test-file-3.sh"])
             XCTAssertEqual(try view.getDirectoryContents(AbsolutePath("/subdir")).sorted(), ["test-file-2.txt"])
             XCTAssertThrows(FileSystemError.isDirectory) {
                 _ = try view.readFileContents(AbsolutePath("/subdir"))
@@ -357,10 +380,10 @@ class GitRepositoryTests: XCTestCase {
             // Add a remote via git cli.
             try systemQuietly([Git.tool, "-C", testRepoPath.asString, "remote", "add", "origin", "../foo"])
             // Test if it was added.
-            XCTAssertEqual(Dictionary(items: try repo.remotes().map { ($0, $1) }), ["origin": "../foo"])
+            XCTAssertEqual(Dictionary(items: try repo.remotes().map { ($0.0, $0.1) }), ["origin": "../foo"])
             // Change remote.
             try repo.setURL(remote: "origin", url: "../bar")
-            XCTAssertEqual(Dictionary(items: try repo.remotes().map { ($0, $1) }), ["origin": "../bar"])
+            XCTAssertEqual(Dictionary(items: try repo.remotes().map { ($0.0, $0.1) }), ["origin": "../bar"])
             // Try changing remote of non-existant remote.
             do {
                 try repo.setURL(remote: "fake", url: "../bar")
@@ -546,17 +569,18 @@ class GitRepositoryTests: XCTestCase {
 
     static var allTests = [
         ("testBranchOperations", testBranchOperations),
-        ("testFetch", testFetch),
-        ("testRepositorySpecifier", testRepositorySpecifier),
-        ("testProvider", testProvider),
-        ("testGitRepositoryHash", testGitRepositoryHash),
-        ("testRawRepository", testRawRepository),
-        ("testSetRemote", testSetRemote),
-        ("testGitFileView", testGitFileView),
+        ("testCheckoutRevision", testCheckoutRevision),
         ("testCheckouts", testCheckouts),
+        ("testFetch", testFetch),
+        ("testGitFileView", testGitFileView),
+        ("testGitRepositoryHash", testGitRepositoryHash),
         ("testHasUnpushedCommits", testHasUnpushedCommits),
-        ("testUncommitedChanges", testUncommitedChanges),
-        ("testSubmodules", testSubmodules),
+        ("testProvider", testProvider),
+        ("testRawRepository", testRawRepository),
+        ("testRepositorySpecifier", testRepositorySpecifier),
+        ("testSetRemote", testSetRemote),
         ("testSubmoduleRead", testSubmoduleRead),
+        ("testSubmodules", testSubmodules),
+        ("testUncommitedChanges", testUncommitedChanges),
     ]
 }

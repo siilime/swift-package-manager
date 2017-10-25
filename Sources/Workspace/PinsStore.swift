@@ -9,36 +9,43 @@
 */
 
 import Basic
-import struct Utility.Version
-import struct SourceControl.RepositorySpecifier
-import typealias PackageGraph.RepositoryPackageConstraint
+import Utility
+import SourceControl
+import PackageGraph
 
-public enum PinOperationError: Swift.Error {
+public enum PinOperationError: Swift.Error, CustomStringConvertible {
     case notPinned
-    case autoPinEnabled
-}
 
-public struct PinsStore {
-    public struct Pin {
-        /// The package name of the pinned dependency.
-        public let package: String
-
-        /// The repository specifier of the pinned dependency.
-        public let repository: RepositorySpecifier
-
-        /// The pinned version.
-        public let version: Version
-
-        /// The reason text for pinning this dependency.
-        public let reason: String?
-
-        init(package: String, repository: RepositorySpecifier, version: Version, reason: String? = nil) {
-            self.package = package 
-            self.repository = repository 
-            self.version = version
-            self.reason = reason
+    public var description: String {
+        switch self {
+        case .notPinned:
+            return "The provided package is not pinned"
         }
     }
+}
+
+public final class PinsStore {
+    public struct Pin {
+        /// The package reference of the pinned dependency.
+        public let packageRef: PackageReference
+
+        /// The pinned state.
+        public let state: CheckoutState
+
+        init(
+            packageRef: PackageReference,
+            state: CheckoutState
+        ) {
+            self.packageRef = packageRef 
+            self.state = state
+        }
+    }
+
+    /// The schema version of the resolved file.
+    ///
+    /// * 2: Package identity.
+    /// * 1: Initial version.
+    static let schemaVersion: Int = 2
 
     /// The path to the pins file.
     fileprivate let pinsFile: AbsolutePath
@@ -47,15 +54,16 @@ public struct PinsStore {
     fileprivate var fileSystem: FileSystem
 
     /// The pins map.
+    ///
+    /// Key -> Package Identity.
     fileprivate(set) var pinsMap: [String: Pin]
-
-    /// Autopin enabled or disabled. Autopin is enabled by default.
-    public fileprivate(set) var autoPin: Bool
 
     /// The current pins.
     public var pins: AnySequence<Pin> {
         return AnySequence<Pin>(pinsMap.values)
     }
+
+    fileprivate let persistence: SimplePersistence
 
     /// Create a new pins store.
     ///
@@ -65,159 +73,135 @@ public struct PinsStore {
     public init(pinsFile: AbsolutePath, fileSystem: FileSystem) throws {
         self.pinsFile = pinsFile
         self.fileSystem = fileSystem
+        self.persistence = SimplePersistence(
+            fileSystem: fileSystem,
+            schemaVersion: PinsStore.schemaVersion,
+            supportedSchemaVersions: [1],
+            statePath: pinsFile,
+            prettyPrint: true)
         pinsMap = [:]
-        autoPin = true
-        try restoreState()
-    }
-
-    /// Update the autopin setting. Writes the setting to pins file.
-    public mutating func setAutoPin(on value: Bool) throws {
-        autoPin = value
-        try saveState()
+        _ = try self.persistence.restoreState(self)
     }
 
     /// Pin a repository at a version.
     ///
-    /// - Parameters:
-    ///   - package: The name of the package to pin.
-    ///   - version: The version to pin at.
-    ///   - reason: The optional reason for pinning.
-    /// - Throws: PinOperationError
-    public mutating func pin(package: String, repository: RepositorySpecifier, at version: Version, reason: String? = nil) throws {
-        // Add pin and save the state.
-        pinsMap[package] = Pin(package: package, repository: repository, version: version, reason: reason)
-        try saveState()
-    }
-
-    /// Unpin a pinnned repository and saves the state.
+    /// This method does not automatically write to state file.
     ///
     /// - Parameters:
-    ///   - package: The package name to unpin. It should already be pinned.
-    /// - Returns: The pin which was removed.
-    /// - Throws: PinOperationError
-    @discardableResult
-    public mutating func unpin(package: String) throws -> Pin {
-        // Ensure autopin is not on.
-        guard !autoPin else {
-            throw PinOperationError.autoPinEnabled
+    ///   - packageRef: The package reference to pin.
+    ///   - state: The state to pin at.
+    public func pin(
+        packageRef: PackageReference,
+        state: CheckoutState
+    ) {
+        pinsMap[packageRef.identity] = Pin(
+            packageRef: packageRef,
+            state: state
+        )
+    }
+
+    /// Add a pin.
+    ///
+    /// This will replace any previous pin with same package name.
+    public func add(_ pin: Pin) {
+        pinsMap[pin.packageRef.identity] = pin
+    }
+
+    /// Pin a managed dependency at its checkout state.
+    ///
+    /// This method does nothing if the dependency is in edited state.
+    func pin(_ dependency: ManagedDependency) {
+
+        // Get the checkout state.
+        let checkoutState: CheckoutState
+        switch dependency.state {
+        case .checkout(let state):
+            checkoutState = state
+        case .edited:
+            return
         }
-        // The repo should already be pinned.
-        guard let pin = pinsMap[package] else { throw PinOperationError.notPinned }
-        // Remove pin and save the state.
-        pinsMap[package] = nil
-        try saveState()
-        return pin
+
+        self.pin(
+            packageRef: dependency.packageRef,
+            state: checkoutState)
     }
 
     /// Unpin all of the currently pinnned dependencies.
-    public mutating func unpinAll() throws {
+    ///
+    /// This method does not automatically write to state file.
+    public func unpinAll() {
         // Reset the pins map.
         pinsMap = [:]
-        // Save the state.
-        try saveState()
     }
 
     /// Creates constraints based on the pins in the store.
     public func createConstraints() -> [RepositoryPackageConstraint] {
-        return pins.map {
-            RepositoryPackageConstraint(container: $0.repository, versionRequirement: .exact($0.version))
-        }
+        return pins.map({ pin in
+            return RepositoryPackageConstraint(
+                container: pin.packageRef, requirement: pin.state.requirement())
+        })
     }
 }
 
 /// Persistence.
-extension PinsStore {
-    // FIXME: A lot of the persistence mechanism here is copied from
-    // `RepositoryManager`. It would be nice to get actual infrastructure around
-    // persistence to handle the boilerplate parts.
+extension PinsStore: SimplePersistanceProtocol {
 
-    private enum PersistenceError: Swift.Error {
-        /// There was a missing or malformed key.
-        case unexpectedData
+    public func saveState() throws {
+        try self.persistence.saveState(self)
     }
 
-    /// The current schema version for the persisted information.
-    private static let currentSchemaVersion = 1
-    
-    fileprivate mutating func restoreState() throws {
-        if !fileSystem.exists(pinsFile) {
-            return
-        }
-        // Load the state.
-        let json = try JSON(bytes: try fileSystem.readFileContents(pinsFile))
+    public func restore(from json: JSON) throws {
+        self.pinsMap = try Dictionary(items: json.get("pins").map({ ($0.packageRef.identity, $0) }))
+    }
 
-        // Load the state from JSON.
-        guard case let .dictionary(contents) = json,
-        case let .int(version)? = contents["version"] else {
-            throw PersistenceError.unexpectedData
-        }
-        // FIXME: We will need migration support when we update pins schema.
-        guard version == PinsStore.currentSchemaVersion else {
-            fatalError("Migration not supported yet")
-        }
-        guard case let .bool(autoPin)? = contents["autoPin"],
-              case let .array(pinsData)? = contents["pins"] else {
-            throw PersistenceError.unexpectedData
-        }
+    public func restore(from json: JSON, supportedSchemaVersion: Int) throws {
+        switch supportedSchemaVersion {
+        case 1:
+            // We did not have concept of package identity in previous schema but we can
+            // compute it using the URL.
+            //
+            // FIXME: This logic will need to be updated when we require identity and package
+            // name to be same. <rdar://problem/33693433>
+            let pinsArray: [JSON] = try json.get("pins")
+            let pins: [Pin] = try pinsArray.map({ pinData in
+                let url: String = try pinData.get("repositoryURL")
+                let ref = PackageReference(
+                    identity: PackageReference.computeIdentity(packageURL: url), path: url)
+                return try Pin(packageRef: ref, state: pinData.get("state"))
+            })
+            self.pinsMap = Dictionary(items: pins.map({ ($0.packageRef.identity, $0) }))
 
-        // Load the pins.
-        var pins = [String: Pin]()
-        for pinData in pinsData {
-            guard let pin = Pin(json: pinData) else {
-                throw PersistenceError.unexpectedData
-            }
-            pins[pin.package] = pin
+        default:
+            fatalError()
         }
-
-        self.autoPin = autoPin
-        self.pinsMap = pins 
     }
 
     /// Saves the current state of pins.
-    fileprivate mutating func saveState() throws {
-        var data = [String: JSON]()
-        data["version"] = .int(PinsStore.currentSchemaVersion)
-        data["pins"] = .array(pins.sorted{ $0.package < $1.package  }.map{ $0.toJSON() })
-        data["autoPin"] = .bool(autoPin)
-        // FIXME: This should write atomically.
-        try fileSystem.writeFileContents(pinsFile, bytes: JSON.dictionary(data).toBytes(prettyPrint: true))
+    public func toJSON() -> JSON {
+        return JSON([
+            "pins": pins.sorted(by: { $0.packageRef.identity < $1.packageRef.identity }).toJSON(),
+        ])
     }
 }
 
 // JSON.
-extension PinsStore.Pin: Equatable {
+extension PinsStore.Pin: JSONMappable, JSONSerializable, Equatable {
     /// Create an instance from JSON data.
-    init?(json data: JSON) {
-        guard case let .dictionary(contents) = data,
-              case let .string(package)? = contents["package"],
-              case let .string(version)? = contents["version"],
-              case let .string(repositoryURL)? = contents["repositoryURL"],
-              let reasonData = contents["reason"] else {
-            return nil
-        }
-        self.package = package
-        self.repository = RepositorySpecifier(url: repositoryURL)
-        if case .string(let reason) = reasonData { 
-            self.reason = reason
-        } else {
-            self.reason = nil
-        }
-        self.version = Version(string: version)!
+    public init(json: JSON) throws {
+        self.packageRef = try json.get("reference")
+        self.state = try json.get("state")
     }
 
     /// Convert the pin to JSON.
-    func toJSON() -> JSON {
-        return .dictionary([
-                "package": .string(package),
-                "repositoryURL": .string(repository.url),
-                "version": .string(String(describing: version)),
-                "reason": reason.flatMap(JSON.string) ?? .null,
-            ])
+    public func toJSON() -> JSON {
+        return .init([
+            "reference": packageRef,
+            "state": state,
+        ])
     }
 
-    public static func ==(lhs: PinsStore.Pin, rhs: PinsStore.Pin) -> Bool {
-        return lhs.package == rhs.package &&
-               lhs.repository == rhs.repository &&
-               lhs.version == rhs.version
+    public static func == (lhs: PinsStore.Pin, rhs: PinsStore.Pin) -> Bool {
+        return lhs.packageRef == rhs.packageRef &&
+               lhs.state == rhs.state
     }
 }

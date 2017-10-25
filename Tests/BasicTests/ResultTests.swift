@@ -1,11 +1,11 @@
 /*
-This source file is part of the Swift.org open source project
+ This source file is part of the Swift.org open source project
 
-Copyright 2016 Apple Inc. and the Swift project authors
-Licensed under Apache License v2.0 with Runtime Library Exception
+ Copyright 2016 Apple Inc. and the Swift project authors
+ Licensed under Apache License v2.0 with Runtime Library Exception
 
-See http://swift.org/LICENSE.txt for license information
-See http://swift.org/CONTRIBUTORS.txt for Swift project authors
+ See http://swift.org/LICENSE.txt for license information
+ See http://swift.org/CONTRIBUTORS.txt for Swift project authors
 */
 
 import XCTest
@@ -15,6 +15,11 @@ import TestSupport
 
 private enum DummyError: Swift.Error {
     case somethingWentWrong
+}
+
+private enum OtherDummyError: Swift.Error {
+    case somethingElseWentWrong
+    case andYetAnotherThingToGoWrong
 }
 
 class ResultTests: XCTestCase {
@@ -160,11 +165,36 @@ class ResultTests: XCTestCase {
         }
     }
 
+    func testFlatMap() throws {
+        XCTAssertEqual(try Result<String, DummyError>("Hello").flatMap { .success($0.utf8.count ) }.dematerialize(), 5)
+
+        XCTAssertThrows(DummyError.somethingWentWrong) {
+            _ = try Result<String, DummyError>.failure(.somethingWentWrong).flatMap { .success($0 + " World") }.dematerialize()
+        }
+
+        XCTAssertThrows(DummyError.somethingWentWrong) {
+            _ = try Result<String, DummyError>.failure(.somethingWentWrong).flatMap { (x: String) -> Result<String, DummyError> in
+                XCTFail("should not be executed")
+                return .success(x + " World")
+            }.dematerialize()
+        }
+
+        XCTAssertThrows(DummyError.somethingWentWrong) {
+            _ = try Result<String, DummyError>("Hello").flatMap { String -> Result<Int, DummyError> in .failure(.somethingWentWrong) }.dematerialize()
+        }
+
+        XCTAssertThrows(OtherDummyError.somethingElseWentWrong) {
+            _ = try Result<String, OtherDummyError>.failure(.somethingElseWentWrong)
+                .flatMap { String -> Result<String, OtherDummyError> in .failure(.andYetAnotherThingToGoWrong) }.dematerialize()
+        }
+    }
+
     static var allTests = [
         ("testBasics", testBasics),
         ("testAnyError", testAnyError),
         ("testMap", testMap),
         ("testMapAny", testMapAny),
+        ("testFlatMap", testFlatMap)
     ]
 }
 

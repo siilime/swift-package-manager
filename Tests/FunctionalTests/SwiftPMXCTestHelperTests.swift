@@ -12,15 +12,15 @@ import Basic
 import TestSupport
 import XCTest
 import Utility
+import Commands
 
 class SwiftPMXCTestHelperTests: XCTestCase {
     func testBasicXCTestHelper() {
-#if os(macOS)
-
+      #if os(macOS)
         fixture(name: "Miscellaneous/SwiftPMXCTestHelper") { prefix in
             // Build the package.
             XCTAssertBuilds(prefix)
-            XCTAssertFileExists(prefix.appending(components: ".build", "debug", "SwiftPMXCTestHelper.swiftmodule"))
+            XCTAssertFileExists(prefix.appending(components: ".build", Destination.host.target, "debug", "SwiftPMXCTestHelper.swiftmodule"))
             // Run swift-test on package.
             XCTAssertSwiftTest(prefix)
             // Expected output dictionary.
@@ -37,9 +37,9 @@ class SwiftPMXCTestHelperTests: XCTestCase {
               ] as Array<Dictionary<String, Any>>]] as Array<Dictionary<String, Any>>
             ] as Dictionary<String, Any> as NSDictionary
             // Run the XCTest helper tool and check result.
-            XCTAssertXCTestHelper(prefix.appending(components: ".build", "debug", "SwiftPMXCTestHelperPackageTests.xctest"), testCases: testCases)
+            XCTAssertXCTestHelper(prefix.appending(components: ".build", Destination.host.target, "debug", "SwiftPMXCTestHelperPackageTests.xctest"), testCases: testCases)
         }
-#endif
+      #endif
     }
     
     static var allTests = [
@@ -51,7 +51,7 @@ class SwiftPMXCTestHelperTests: XCTestCase {
 #if os(macOS)
 func XCTAssertXCTestHelper(_ bundlePath: AbsolutePath, testCases: NSDictionary) {
     do {
-        let env = ["DYLD_FRAMEWORK_PATH": try platformFrameworksPath().asString]
+        let env = ["DYLD_FRAMEWORK_PATH": Resources.default.sdkPlatformFrameworksPath.asString]
         let outputFile = bundlePath.parentDirectory.appending(component: "tests.txt")
         let _ = try SwiftPMProduct.XCTestHelper.execute([bundlePath.asString, outputFile.asString], env: env, printIfError: true)
         guard let data = NSData(contentsOfFile: outputFile.asString) else {
